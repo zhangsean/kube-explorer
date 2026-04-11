@@ -1,0 +1,2 @@
+(window["webpackJsonp"]=window["webpackJsonp"]||[]).push([["chunk-2d0d7462"],{"75b0":function(e,c,n){"use strict";n.r(c);var s=function(){var e=this,c=e._self._c;return c("ResourceDetail")},u=[],t=n("c854"),a={name:"ClusterResourceNamespaceId",components:{ResourceDetail:t["a"]}},o=a,l=n("0c7c"),r=Object(l["a"])(o,s,u,!1,null,null,null);c["default"]=r.exports}}]);
+//# sourceMappingURL=chunk-2d0d7462.dfb3a429.js.map

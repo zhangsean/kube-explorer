@@ -1,0 +1,2 @@
+(window["webpackJsonp"]=window["webpackJsonp"]||[]).push([["chunk-2d229b7d"],{df49:function(e,n,c){"use strict";c.r(n);var t=function(){var e=this,n=e._self._c;return n("ResourceDetail")},a=[],o=c("c854"),u={name:"AlertmanagerConfig",components:{ResourceDetail:o["a"]}},l=u,r=c("0c7c"),s=Object(r["a"])(l,t,a,!1,null,null,null);n["default"]=s.exports}}]);
+//# sourceMappingURL=chunk-2d229b7d.138baf0b.js.map

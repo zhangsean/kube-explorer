@@ -1,0 +1,2 @@
+(window["webpackJsonp"]=window["webpackJsonp"]||[]).push([["chunk-2d0f009c"],{"9b52":function(e,r,n){"use strict";n.r(r);var c=function(){var e=this,r=e._self._c;return r("ResourceDetail",{attrs:{"resource-override":"nodeDriver","parent-route-override":"c-cluster-manager-driver-nodedriver"}})},o=[],t=n("c854"),a={name:"NodeDriverCreate",components:{ResourceDetail:t["a"]}},u=a,i=n("0c7c"),s=Object(i["a"])(u,c,o,!1,null,null,null);r["default"]=s.exports}}]);
+//# sourceMappingURL=chunk-2d0f009c.f6b8d046.js.map

@@ -1,0 +1,2 @@
+(window["webpackJsonp"]=window["webpackJsonp"]||[]).push([["chunk-2d2160ce"],{c18b:function(e,r,c){"use strict";c.r(r);var t=function(){var e=this,r=e._self._c;return r("ResourceDetail",{attrs:{"resource-override":e.resource}})},u=[],n=c("c854"),o={name:"RouteReceiverCreate",components:{ResourceDetail:n["a"]},data:function(){var e=this.$route.query.resource;return{resource:e}}},s=o,a=c("0c7c"),i=Object(a["a"])(s,t,u,!1,null,null,null);r["default"]=i.exports}}]);
+//# sourceMappingURL=chunk-2d2160ce.d80f7796.js.map

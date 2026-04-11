@@ -1,0 +1,2 @@
+(window["webpackJsonp"]=window["webpackJsonp"]||[]).push([["chunk-2d212fc4"],{ab6c:function(r,o,t){"use strict";t.r(o);var e=function(){var r=this,o=r._self._c;return o("div",{staticClass:"dashboard-root"})},n=[],c=(t("ac1f"),t("5319"),t("659d")),s={mixins:[c["a"]],beforeMount:function(){this.$store.commit("setError",{error:new Error("404: This page could not be found")}),this.$router.replace("/fail-whale")}},a=s,i=t("0c7c"),u=Object(i["a"])(a,e,n,!1,null,null,null);o["default"]=u.exports}}]);
+//# sourceMappingURL=chunk-2d212fc4.e224a09e.js.map

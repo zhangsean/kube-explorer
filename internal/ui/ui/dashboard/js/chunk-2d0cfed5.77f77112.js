@@ -1,0 +1,2 @@
+(window["webpackJsonp"]=window["webpackJsonp"]||[]).push([["chunk-2d0cfed5"],{6698:function(e,n,r){"use strict";r.r(n);var t=function(){var e=this,n=e._self._c;return n("ResourceDetail",{attrs:{"resource-override":"kontainerDriver"}})},c=[],o=r("c854"),a={name:"KontainerDriverEditPage",components:{ResourceDetail:o["a"]}},i=a,s=r("0c7c"),u=Object(s["a"])(i,t,c,!1,null,null,null);n["default"]=u.exports}}]);
+//# sourceMappingURL=chunk-2d0cfed5.77f77112.js.map

@@ -1,0 +1,2 @@
+(window["webpackJsonp"]=window["webpackJsonp"]||[]).push([["chunk-2d0ba365"],{"35f3":function(e,r,n){"use strict";n.r(r);var t=function(){var e=this,r=e._self._c;return r("ResourceDetail",{attrs:{"store-override":"rancher","resource-override":"token","parent-route-override":"account"}})},o=[],c=n("c854"),a={name:"APIKeyCreate",components:{ResourceDetail:c["a"]}},u=a,s=n("0c7c"),i=Object(s["a"])(u,t,o,!1,null,null,null);r["default"]=i.exports}}]);
+//# sourceMappingURL=chunk-2d0ba365.0ac037c0.js.map

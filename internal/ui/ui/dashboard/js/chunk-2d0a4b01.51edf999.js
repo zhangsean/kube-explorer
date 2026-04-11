@@ -1,0 +1,2 @@
+(window["webpackJsonp"]=window["webpackJsonp"]||[]).push([["chunk-2d0a4b01"],{"0803":function(n,t,e){"use strict";e.r(t);var c=function(){var n=this,t=n._self._c;return t("div",[n._v("Redirecting...")])},i=[],o={mounted:function(){var n=this.$store.getters["backToRancherLink"];window.location.href=n}},r=o,u=e("0c7c"),a=Object(u["a"])(r,c,i,!1,null,null,null);t["default"]=a.exports}}]);
+//# sourceMappingURL=chunk-2d0a4b01.51edf999.js.map

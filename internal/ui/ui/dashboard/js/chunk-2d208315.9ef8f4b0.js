@@ -1,0 +1,2 @@
+(window["webpackJsonp"]=window["webpackJsonp"]||[]).push([["chunk-2d208315"],{a46b:function(e,n,c){"use strict";c.r(n);var o=function(){var e=this,n=e._self._c;return n("ResourceDetail")},s=[],u=c("c854"),t={name:"RolesResourcedId",components:{ResourceDetail:u["a"]}},a=t,l=c("0c7c"),r=Object(l["a"])(a,o,s,!1,null,null,null);n["default"]=r.exports}}]);
+//# sourceMappingURL=chunk-2d208315.9ef8f4b0.js.map
