@@ -9,6 +9,7 @@ source $(dirname $0)/version
 [ "$(uname)" != "Darwin" ] && LINKFLAGS="-extldflags -static -s"
 
 CGO_ENABLED=0 go build \
+    -tags=embed \
     -ldflags \
     "$LINKFLAGS" \
     -o bin/kube-explorer
