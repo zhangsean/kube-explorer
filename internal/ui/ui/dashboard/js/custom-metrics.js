@@ -4,8 +4,8 @@
     const CONFIG = {
         resourceType: 'pod',
         columns: [
-            { key: 'cpuUsage', label: 'CPU', width: '120px' },
-            { key: 'memoryUsage', label: 'RAM', width: '120px' }
+            { key: 'cpuUsage', label: 'CPU', width: '100px' },
+            { key: 'memoryUsage', label: 'RAM', width: '100px' }
         ]
     };
 
@@ -17,7 +17,55 @@
     let lastFetchTime = 0;
     let lastNodeFetchTime = 0;
     const CACHE_DURATION = 3000;
+    const REFRESH_INTERVAL = 10000;
+    const MIN_PROCESS_GAP = 700;
     let processTimer = null;
+    let isProcessing = false;
+    let pendingProcess = false;
+    let lastProcessStartedAt = 0;
+    let suppressMutationsUntil = 0;
+    let rawPodsCache = null;
+    let rawNodesCache = null;
+    let rawPodMetricsCache = null;
+    let rawPodsFetchedAt = 0;
+    let rawNodesFetchedAt = 0;
+    let rawPodMetricsFetchedAt = 0;
+    let rawPodsPromise = null;
+    let rawNodesPromise = null;
+    let rawPodMetricsPromise = null;
+
+    function normalizeHeaderText(text) {
+        return (text || '')
+            .toString()
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, '')
+            .replace(/[():\-_/]/g, '');
+    }
+
+    function getTableHeaderTexts(table) {
+        const headers = table ? table.querySelectorAll('th') : [];
+        return Array.from(headers).map((th) => normalizeHeaderText(th.textContent));
+    }
+
+    function hasAnyHeader(headerTexts, aliases) {
+        return aliases.some((alias) => {
+            const target = normalizeHeaderText(alias);
+            return headerTexts.some((header) => header === target || header.includes(target));
+        });
+    }
+
+    function headerIndexByAliases(headerRow, aliases) {
+        if (!headerRow) return -1;
+        const headers = Array.from(headerRow.querySelectorAll('th'));
+        return headers.findIndex((th) => {
+            const text = normalizeHeaderText(th.textContent);
+            return aliases.some((alias) => {
+                const target = normalizeHeaderText(alias);
+                return text === target || text.includes(target);
+            });
+        });
+    }
 
     function injectStyles() {
         if (document.getElementById('custom-pod-metrics-styles')) return;
@@ -198,16 +246,19 @@
     }
 
     function isPodTable(table) {
-        const headers = table.querySelectorAll('th');
-        if (!headers.length) return false;
-        const headerTexts = Array.from(headers).map(th => (th.textContent || '').trim().toLowerCase());
-        const hasName = headerTexts.includes('name');
-        const hasReady = headerTexts.includes('ready');
-        const hasRestarts = headerTexts.includes('restarts');
-        const hasIP = headerTexts.includes('ip');
-        const hasNode = headerTexts.includes('node');
+        const headerTexts = getTableHeaderTexts(table);
+        if (!headerTexts.length) return false;
+        const hasName = hasAnyHeader(headerTexts, ['name', '名称']);
+        const hasReady = hasAnyHeader(headerTexts, ['ready', '就绪']);
+        const hasRestarts = hasAnyHeader(headerTexts, ['restarts', '重启', '重启次数']);
+        const hasIP = hasAnyHeader(headerTexts, ['ip', 'podip', '内部ip']);
+        const hasNode = hasAnyHeader(headerTexts, ['node', '节点']);
         // Restrict to pod-style list tables to avoid deployment list pages.
-        return hasName && hasReady && hasRestarts && hasIP && hasNode;
+        if (hasName && hasReady && hasRestarts && hasIP && hasNode) return true;
+
+        // Locale-independent fallback: pod list rows include links containing /pod/{ns}/{name}.
+        const podLinks = table.querySelectorAll('tbody a[href*="/pod/"]');
+        return podLinks.length > 0;
     }
 
     function findPodTables() {
@@ -222,15 +273,16 @@
     }
 
     function isNodeTable(table) {
-        const headers = table.querySelectorAll('th');
-        if (!headers.length) return false;
-        const headerTexts = Array.from(headers).map(th => (th.textContent || '').trim().toLowerCase());
-        const hasName = headerTexts.includes('name');
-        const hasOS = headerTexts.includes('os');
-        const hasCPU = headerTexts.some((h) => h.startsWith('cpu'));
-        const hasRAM = headerTexts.some((h) => h.startsWith('ram'));
-        const hasPods = headerTexts.includes('pods');
-        return hasName && hasOS && hasCPU && hasRAM && hasPods;
+        const headerTexts = getTableHeaderTexts(table);
+        if (!headerTexts.length) return false;
+        const hasName = hasAnyHeader(headerTexts, ['name', '名称']);
+        const hasOS = hasAnyHeader(headerTexts, ['os', '操作系统']);
+        const hasCPU = hasAnyHeader(headerTexts, ['cpu']);
+        const hasRAM = hasAnyHeader(headerTexts, ['ram', 'memory', '内存']);
+        const hasPods = hasAnyHeader(headerTexts, ['pods', 'pod', 'pods数', 'pod数量']);
+        if (hasName && hasOS && hasCPU && hasRAM && hasPods) return true;
+        const nodeLinks = table.querySelectorAll('tbody a[href*="/node/"]');
+        return nodeLinks.length > 0;
     }
 
     function findNodeTables() {
@@ -254,12 +306,15 @@
         if (!headerRow) return;
 
         const headers = () => Array.from(headerRow.querySelectorAll('th'));
-        const findHeaderIndex = (label) => headers().findIndex((th) => ((th.textContent || '').trim().toLowerCase().startsWith(label.toLowerCase())));
+        const findHeaderIndex = (aliases) => {
+            const list = Array.isArray(aliases) ? aliases : [aliases];
+            return headerIndexByAliases(headerRow, list);
+        };
         const findMemoryHeaderIndex = () => {
             const all = headers();
             return all.findIndex((th) => {
-                const text = ((th.textContent || '').trim().toLowerCase());
-                return text.startsWith('ram') || text.startsWith('memory');
+                const text = normalizeHeaderText(th.textContent);
+                return text.startsWith('ram') || text.startsWith('memory') || text.includes('内存');
             });
         };
         const insertHeaderAt = (index, label, key) => {
@@ -306,12 +361,12 @@
             return !!row.querySelector('a');
         };
 
-        const restartIndex = findHeaderIndex('Restarts');
-        let cpuIndex = findHeaderIndex('CPU');
+        const restartIndex = findHeaderIndex(['Restarts', '重启', '重启次数']);
+        let cpuIndex = findHeaderIndex(['CPU']);
         let memoryIndex = findMemoryHeaderIndex();
         if (cpuIndex < 0 && restartIndex >= 0) {
             insertHeaderAt(restartIndex + 1, 'CPU', 'cpuUsage');
-            cpuIndex = findHeaderIndex('CPU');
+            cpuIndex = findHeaderIndex(['CPU']);
         }
         if (memoryIndex < 0) {
             const afterCpu = cpuIndex >= 0 ? cpuIndex + 1 : (restartIndex >= 0 ? restartIndex + 1 : headers().length);
@@ -324,12 +379,12 @@
         if (restartIndex >= 0) {
             if (cpuIndex !== restartIndex + 1) {
                 moveColumn(cpuIndex, restartIndex + 1);
-                cpuIndex = findHeaderIndex('CPU');
+                cpuIndex = findHeaderIndex(['CPU']);
                 memoryIndex = findMemoryHeaderIndex();
             }
             if (memoryIndex !== restartIndex + 2) {
                 moveColumn(memoryIndex, restartIndex + 2);
-                cpuIndex = findHeaderIndex('CPU');
+                cpuIndex = findHeaderIndex(['CPU']);
                 memoryIndex = findMemoryHeaderIndex();
             }
         }
@@ -389,24 +444,30 @@
         const headerRow = table.querySelector('thead tr');
         if (!headerRow) return;
         const headers = Array.from(headerRow.querySelectorAll('th'));
-        const findIdx = (pred) => headers.findIndex((th) => pred(((th.textContent || '').trim().toLowerCase())));
+        const findIdx = (pred) => headers.findIndex((th) => pred(normalizeHeaderText(th.textContent)));
         const cpuIdx = findIdx((t) => t.startsWith('cpu'));
-        const ramIdx = findIdx((t) => t.startsWith('ram') || t.startsWith('memory'));
-        const ageIdx = findIdx((t) => t.startsWith('age'));
+        const ramIdx = findIdx((t) => t.startsWith('ram') || t.startsWith('memory') || t.includes('内存'));
+        const ageIdx = findIdx((t) => t.startsWith('age') || t === '年龄');
+        const layoutSig = `${cpuIdx}|${ramIdx}|${ageIdx}|${colWidthByKey('cpuUsage')}|${colWidthByKey('memoryUsage')}|${colWidthByKey('age')}`;
+        const lastSig = table.dataset.podLayoutSig || '';
 
         const setHeaderWidth = (idx, w) => {
             if (idx < 0 || !w) return;
             headers[idx].style.width = w;
             headers[idx].style.minWidth = w;
         };
-        setHeaderWidth(cpuIdx, colWidthByKey('cpuUsage'));
-        setHeaderWidth(ramIdx, colWidthByKey('memoryUsage'));
-        setHeaderWidth(ageIdx, colWidthByKey('age'));
+        if (lastSig !== layoutSig) {
+            setHeaderWidth(cpuIdx, colWidthByKey('cpuUsage'));
+            setHeaderWidth(ramIdx, colWidthByKey('memoryUsage'));
+            setHeaderWidth(ageIdx, colWidthByKey('age'));
+            table.dataset.podLayoutSig = layoutSig;
+        }
 
         const tbody = table.querySelector('tbody');
         if (!tbody) return;
         const rows = Array.from(tbody.querySelectorAll('tr'));
         rows.forEach((row) => {
+            if (row.dataset.podLayoutSigApplied === layoutSig) return;
             const cells = row.querySelectorAll('td');
             const setCellWidth = (idx, w) => {
                 if (idx < 0 || !w || !cells[idx]) return;
@@ -416,6 +477,7 @@
             setCellWidth(cpuIdx, colWidthByKey('cpuUsage'));
             setCellWidth(ramIdx, colWidthByKey('memoryUsage'));
             setCellWidth(ageIdx, colWidthByKey('age'));
+            row.dataset.podLayoutSigApplied = layoutSig;
         });
     }
 
@@ -426,11 +488,11 @@
         if (!headerRow) return result;
         const headers = Array.from(headerRow.querySelectorAll('th'));
         headers.forEach((th, index) => {
-            const text = (th.textContent || '').trim().toLowerCase();
+            const text = normalizeHeaderText(th.textContent);
             if (!text) return;
-            if (text.startsWith('restarts') && typeof result.restarts !== 'number') result.restarts = index;
+            if ((text.startsWith('restarts') || text.includes('重启')) && typeof result.restarts !== 'number') result.restarts = index;
             if (text.startsWith('cpu') && typeof result.cpu !== 'number') result.cpu = index;
-            if ((text.startsWith('memory') || text.startsWith('ram')) && typeof result.memory !== 'number') result.memory = index;
+            if ((text.startsWith('memory') || text.startsWith('ram') || text.includes('内存')) && typeof result.memory !== 'number') result.memory = index;
         });
         return result;
     }
@@ -633,7 +695,6 @@
 
     async function fetchPodsJSON() {
         return fetchJSON([
-            // '/k8s/clusters/local/v1/pods?exclude=metadata.managedFields',
             '/v1/pods?exclude=metadata.managedFields',
         ], 'pods');
     }
@@ -646,9 +707,68 @@
 
     async function fetchPodMetricsJSON() {
         return fetchJSON([
-            // '/k8s/clusters/local/v1/metrics.k8s.io.pods?exclude=metadata.managedFields',
             '/v1/metrics.k8s.io.pods?exclude=metadata.managedFields',
         ], 'pod metrics');
+    }
+
+    async function getPodsData() {
+        const now = Date.now();
+        if (rawPodsCache && now - rawPodsFetchedAt < CACHE_DURATION) {
+            return rawPodsCache;
+        }
+        if (rawPodsPromise) {
+            return rawPodsPromise;
+        }
+        rawPodsPromise = fetchPodsJSON()
+            .then((data) => {
+                rawPodsCache = data;
+                rawPodsFetchedAt = Date.now();
+                return data;
+            })
+            .finally(() => {
+                rawPodsPromise = null;
+            });
+        return rawPodsPromise;
+    }
+
+    async function getNodesData() {
+        const now = Date.now();
+        if (rawNodesCache && now - rawNodesFetchedAt < CACHE_DURATION) {
+            return rawNodesCache;
+        }
+        if (rawNodesPromise) {
+            return rawNodesPromise;
+        }
+        rawNodesPromise = fetchNodesJSON()
+            .then((data) => {
+                rawNodesCache = data;
+                rawNodesFetchedAt = Date.now();
+                return data;
+            })
+            .finally(() => {
+                rawNodesPromise = null;
+            });
+        return rawNodesPromise;
+    }
+
+    async function getPodMetricsData() {
+        const now = Date.now();
+        if (rawPodMetricsCache && now - rawPodMetricsFetchedAt < CACHE_DURATION) {
+            return rawPodMetricsCache;
+        }
+        if (rawPodMetricsPromise) {
+            return rawPodMetricsPromise;
+        }
+        rawPodMetricsPromise = fetchPodMetricsJSON()
+            .then((data) => {
+                rawPodMetricsCache = data;
+                rawPodMetricsFetchedAt = Date.now();
+                return data;
+            })
+            .finally(() => {
+                rawPodMetricsPromise = null;
+            });
+        return rawPodMetricsPromise;
     }
 
     function getNodeResourceCapacity(node) {
@@ -669,7 +789,7 @@
         }
 
         try {
-            const [nodesData, podsData] = await Promise.all([fetchNodesJSON(), fetchPodsJSON()]);
+            const [nodesData, podsData] = await Promise.all([getNodesData(), getPodsData()]);
             const nodes = nodesData.data || [];
             const pods = podsData.data || [];
             const summary = {};
@@ -742,9 +862,9 @@
         }
 
         try {
-            const podsData = await fetchPodsJSON();
+            const podsData = await getPodsData();
             const pods = podsData.data || [];
-            const podMetricsData = await fetchPodMetricsJSON();
+            const podMetricsData = await getPodMetricsData();
             const podMetrics = podMetricsData.data || [];
 
             podResourcesCache = {};
@@ -830,6 +950,57 @@
         container.appendChild(requestLimit);
 
         return container;
+    }
+
+    function metricRenderSignature(usage, request, limit, unit) {
+        return [
+            unit,
+            Math.round(usage || 0),
+            Math.round(request || 0),
+            Math.round(limit || 0)
+        ].join('|');
+    }
+
+    function renderMetricCell(cell, usage, request, limit, unit) {
+        const sig = metricRenderSignature(usage, request, limit, unit);
+        if (cell.dataset.metricSig === sig) return;
+        cell.dataset.metricSig = sig;
+
+        const hasData = usage > 0 || request > 0 || limit > 0;
+        if (!hasData) {
+            if (cell.dataset.metricMode !== 'empty' || cell.textContent !== '-') {
+                cell.textContent = '-';
+                cell.dataset.metricMode = 'empty';
+            }
+            return;
+        }
+
+        let container = cell.querySelector('.metrics-progress-container');
+        if (!container || cell.dataset.metricMode !== 'bar') {
+            cell.innerHTML = '';
+            cell.style.background = 'transparent';
+            container = createProgressBar(usage, request, limit, unit);
+            cell.appendChild(container);
+            cell.dataset.metricMode = 'bar';
+            return;
+        }
+
+        const fill = container.querySelector('.metrics-progress-fill');
+        const value = container.querySelector('.metrics-value');
+        const requestLimit = container.querySelector('.metrics-request-limit');
+        const percentage = calculateUsagePercentage(usage, request, limit);
+        const limitPercentage = limit > 0 ? (usage / limit) * 100 : 0;
+        if (fill) {
+            fill.style.width = `${Math.min(percentage, 100)}%`;
+            fill.classList.toggle('limit-warning', limit > 0 && limitPercentage >= 90);
+        }
+        if (value) value.textContent = `${Math.round(usage)}${unit}`;
+        if (requestLimit) {
+            const parts = [];
+            if (request > 0) parts.push(`Req ${Math.round(request)}${unit}`);
+            if (limit > 0) parts.push(`Lim ${Math.round(limit)}${unit}`);
+            requestLimit.textContent = parts.length > 0 ? parts.join(' / ') : '-';
+        }
     }
 
     function getRowMetricValue(row, key, metrics) {
@@ -926,8 +1097,10 @@
             resetAllSortIcons(headerRow);
         }
         headers.forEach((th) => {
-            const text = (th.textContent || '').trim().toLowerCase();
-            const key = text.startsWith('cpu') ? 'cpuUsage' : ((text.startsWith('memory') || text.startsWith('ram')) ? 'memoryUsage' : '');
+            const text = normalizeHeaderText(th.textContent);
+            const key = text.startsWith('cpu')
+                ? 'cpuUsage'
+                : ((text.startsWith('memory') || text.startsWith('ram') || text.includes('内存')) ? 'memoryUsage' : '');
             if (!key) return;
 
             th.classList.add('metrics-sortable');
@@ -1015,41 +1188,16 @@
                 const cell = resolveMetricCell(row, col.key, colIndex);
                 if (!cell) return;
 
-                cell.innerHTML = '';
-                cell.style.background = 'transparent';
-
                 if (col.key === 'cpuUsage') {
                     const cpuUsage = podMetrics ? podMetrics.cpuUsageValue : 0;
                     const cpuRequest = podResources ? podResources.cpuRequest : 0;
                     const cpuLimit = podResources ? podResources.cpuLimit : 0;
-
-                    if (cpuUsage > 0 || cpuRequest > 0 || cpuLimit > 0) {
-                        const bar = createProgressBar(
-                            cpuUsage,
-                            cpuRequest,
-                            cpuLimit,
-                            'm'
-                        );
-                        cell.appendChild(bar);
-                    } else {
-                        cell.textContent = '-';
-                    }
+                    renderMetricCell(cell, cpuUsage, cpuRequest, cpuLimit, 'm');
                 } else if (col.key === 'memoryUsage') {
                     const memoryUsage = podMetrics ? podMetrics.memoryUsageValue : 0;
                     const memoryRequest = podResources ? podResources.memoryRequest : 0;
                     const memoryLimit = podResources ? podResources.memoryLimit : 0;
-
-                    if (memoryUsage > 0 || memoryRequest > 0 || memoryLimit > 0) {
-                        const bar = createProgressBar(
-                            memoryUsage,
-                            memoryRequest,
-                            memoryLimit,
-                            'Mi'
-                        );
-                        cell.appendChild(bar);
-                    } else {
-                        cell.textContent = '-';
-                    }
+                    renderMetricCell(cell, memoryUsage, memoryRequest, memoryLimit, 'Mi');
                 }
             });
         });
@@ -1062,13 +1210,13 @@
         if (!headerRow) return result;
         const headers = Array.from(headerRow.querySelectorAll('th'));
         headers.forEach((th, index) => {
-            const text = (th.textContent || '').trim().toLowerCase();
+            const text = normalizeHeaderText(th.textContent);
             if (!text) return;
-            if (text === 'name' && typeof result.name !== 'number') result.name = index;
-            if (text.startsWith('version') && typeof result.version !== 'number') result.version = index;
-            if (text.startsWith('external/internal ip') && typeof result.ip !== 'number') result.ip = index;
+            if ((text === 'name' || text === '名称') && typeof result.name !== 'number') result.name = index;
+            if ((text.startsWith('version') || text.includes('版本')) && typeof result.version !== 'number') result.version = index;
+            if ((text.startsWith('externalinternalip') || text.includes('内部ip') || text.includes('externalinternalip')) && typeof result.ip !== 'number') result.ip = index;
             if (text.startsWith('cpu') && typeof result.cpu !== 'number') result.cpu = index;
-            if (text.startsWith('ram') && typeof result.ram !== 'number') result.ram = index;
+            if ((text.startsWith('ram') || text.startsWith('memory') || text.includes('内存')) && typeof result.ram !== 'number') result.ram = index;
         });
         return result;
     }
@@ -1077,6 +1225,8 @@
         if (!table || !headerIndexes) return;
         const headerRow = table.querySelector('thead tr');
         if (!headerRow) return;
+        const layoutSig = `${headerIndexes.version}|${headerIndexes.ip}|${headerIndexes.cpu}|${headerIndexes.ram}|170|340|200|200`;
+        const lastSig = table.dataset.nodeLayoutSig || '';
 
         const headers = headerRow.querySelectorAll('th');
         const setHeaderWidth = (index, width) => {
@@ -1085,16 +1235,20 @@
             headers[index].style.minWidth = width;
         };
 
-        // Rebalance Node list columns: shrink Version, slightly widen IP, keep CPU/RAM roomy.
-        setHeaderWidth(headerIndexes.version, '170px');
-        setHeaderWidth(headerIndexes.ip, '340px');
-        setHeaderWidth(headerIndexes.cpu, '200px');
-        setHeaderWidth(headerIndexes.ram, '200px');
+        if (lastSig !== layoutSig) {
+            // Rebalance Node list columns: shrink Version, slightly widen IP, keep CPU/RAM roomy.
+            setHeaderWidth(headerIndexes.version, '170px');
+            setHeaderWidth(headerIndexes.ip, '340px');
+            setHeaderWidth(headerIndexes.cpu, '200px');
+            setHeaderWidth(headerIndexes.ram, '200px');
+            table.dataset.nodeLayoutSig = layoutSig;
+        }
 
         const tbody = table.querySelector('tbody');
         if (!tbody) return;
         const rows = Array.from(tbody.querySelectorAll('tr'));
         rows.forEach((row) => {
+            if (row.dataset.nodeLayoutSigApplied === layoutSig) return;
             const cells = row.querySelectorAll('td');
             const setCellWidth = (index, width) => {
                 if (typeof index !== 'number' || index < 0 || !cells[index]) return;
@@ -1106,6 +1260,7 @@
             setCellWidth(headerIndexes.ip, '340px');
             setCellWidth(headerIndexes.cpu, '200px');
             setCellWidth(headerIndexes.ram, '200px');
+            row.dataset.nodeLayoutSigApplied = layoutSig;
         });
     }
 
@@ -1218,11 +1373,20 @@
             const gap = Math.max(12, Math.round(ramRect.left - cpuRect.left - 200));
             const cpuBlock = container.querySelector('.cpu-block');
             const ramBlock = container.querySelector('.ram-block');
-            container.style.left = `${cpuLeft}px`;
-            container.style.marginLeft = '0px';
-            if (cpuBlock) cpuBlock.style.minWidth = `${Math.max(180, Math.round(cpuRect.width))}px`;
-            if (ramBlock) ramBlock.style.minWidth = `${Math.max(180, Math.round(ramRect.width))}px`;
-            if (ramBlock) ramBlock.style.marginLeft = `${gap}px`;
+            const layoutSig = [
+                cpuLeft,
+                Math.max(180, Math.round(cpuRect.width)),
+                Math.max(180, Math.round(ramRect.width)),
+                gap
+            ].join('|');
+            if (container.dataset.layoutSig !== layoutSig) {
+                container.dataset.layoutSig = layoutSig;
+                container.style.left = `${cpuLeft}px`;
+                container.style.marginLeft = '0px';
+                if (cpuBlock) cpuBlock.style.minWidth = `${Math.max(180, Math.round(cpuRect.width))}px`;
+                if (ramBlock) ramBlock.style.minWidth = `${Math.max(180, Math.round(ramRect.width))}px`;
+                if (ramBlock) ramBlock.style.marginLeft = `${gap}px`;
+            }
         }
 
         const cpuReqPct = summary.cpuTotal > 0 ? (summary.cpuRequest / summary.cpuTotal) * 100 : 0;
@@ -1239,6 +1403,19 @@
         const memReq = container.querySelector('.mem-req');
         const memLim = container.querySelector('.mem-lim');
         const memAll = container.querySelector('.mem-all');
+
+        const summarySig = [
+            cpuReqPct.toFixed(3),
+            cpuLimPct.toFixed(3),
+            memReqPct.toFixed(3),
+            memLimPct.toFixed(3),
+            cpuTotalLabel,
+            memTotalLabel
+        ].join('|');
+        if (container.dataset.summarySig === summarySig) {
+            return;
+        }
+        container.dataset.summarySig = summarySig;
 
         if (cpuReq) cpuReq.textContent = `Req ${formatPercent(cpuReqPct)}`;
         if (cpuLim) cpuLim.textContent = `Lim ${formatPercent(cpuLimPct)}`;
@@ -1272,14 +1449,6 @@
             if (!nodeName) return;
             const summary = summaryMap[nodeName];
             if (!summary) return;
-
-            const cells = row.querySelectorAll('td');
-            if (cpuIndex >= 0 && cells[cpuIndex]) {
-                clearNodeCellSummary(cells[cpuIndex]);
-            }
-            if (ramIndex >= 0 && cells[ramIndex]) {
-                clearNodeCellSummary(cells[ramIndex]);
-            }
 
             const metaRow = findNodeMetaRow(row);
             if (metaRow) {
@@ -1317,15 +1486,38 @@
         });
     }
 
+    async function runProcessCycle() {
+        if (isProcessing) {
+            pendingProcess = true;
+            return;
+        }
+        isProcessing = true;
+        lastProcessStartedAt = Date.now();
+        suppressMutationsUntil = lastProcessStartedAt + 800;
+        try {
+            await processPodsPage();
+            await processNodesPage();
+        } finally {
+            isProcessing = false;
+            suppressMutationsUntil = Date.now() + 300;
+            if (pendingProcess) {
+                pendingProcess = false;
+                scheduleProcess(120);
+            }
+        }
+    }
+
     function scheduleProcess(delay = 50) {
+        const now = Date.now();
+        const gapWait = Math.max(0, MIN_PROCESS_GAP - (now - lastProcessStartedAt));
+        const wait = Math.max(delay, gapWait);
         if (processTimer) {
             clearTimeout(processTimer);
         }
-        processTimer = setTimeout(() => {
+        processTimer = setTimeout(async () => {
             processTimer = null;
-            processPodsPage();
-            processNodesPage();
-        }, delay);
+            await runProcessCycle();
+        }, wait);
     }
 
     function observeChanges() {
@@ -1334,6 +1526,8 @@
         }
 
         observer = new MutationObserver((mutations) => {
+            if (Date.now() < suppressMutationsUntil) return;
+            if (isProcessing) return;
             for (let mutation of mutations) {
                 if (mutation.type !== 'childList' || mutation.addedNodes.length === 0) {
                     continue;
@@ -1379,11 +1573,10 @@
         };
 
         setInterval(() => {
-            processPodsPage();
-            processNodesPage();
-        }, 5000);
+            if (document.hidden) return;
+            scheduleProcess(120);
+        }, REFRESH_INTERVAL);
     }
 
     init();
 })();
-
