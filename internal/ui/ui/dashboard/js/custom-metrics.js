@@ -18,6 +18,7 @@
     let lastNodeFetchTime = 0;
     const CACHE_DURATION = 3000;
     const REFRESH_INTERVAL = 10000;
+    const ENABLE_NODE_POD_ENHANCEMENTS = true;
     const MIN_PROCESS_GAP = 700;
     let processTimer = null;
     let isProcessing = false;
@@ -241,6 +242,114 @@
             .main-layout .outlet {
                 padding: 10px !important;
             }
+
+            .node-pod-actions-bar {
+                display: flex;
+                align-items: center;
+                justify-content: flex-start;
+                margin: 6px 0 10px;
+                gap: 10px;
+            }
+
+            .node-pod-delete-btn {
+                min-width: 86px;
+            }
+
+            .node-pod-delete-btn i {
+                margin-right: 6px;
+            }
+
+            .node-pod-selected-tip {
+                color: #667085;
+                font-size: 13px;
+            }
+
+            .node-pod-select-cell,
+            .node-pod-select-header {
+                width: 36px;
+                min-width: 36px;
+                text-align: center;
+                vertical-align: middle;
+            }
+
+            .node-pod-op-header,
+            .node-pod-op-cell {
+                width: 74px;
+                min-width: 74px;
+                text-align: right;
+                vertical-align: middle;
+            }
+
+            .node-pod-op-cell .btn.btn-sm.role-multi-action.actions {
+                margin-right: 2px;
+                border: 0 !important;
+                background: transparent !important;
+                box-shadow: none !important;
+                padding-left: 4px;
+                padding-right: 4px;
+            }
+
+            .node-pod-op-cell .btn.btn-sm.role-multi-action.actions:hover,
+            .node-pod-op-cell .btn.btn-sm.role-multi-action.actions:focus,
+            .node-pod-op-cell .btn.btn-sm.role-multi-action.actions:active {
+                border: 0 !important;
+                background: transparent !important;
+                box-shadow: none !important;
+            }
+
+            .node-pod-action-menu-root {
+                position: relative;
+                display: inline-block;
+            }
+
+            .node-pod-action-menu-root .menu {
+                position: absolute;
+                display: none;
+                top: 22px;
+                right: 0;
+                z-index: 41;
+                min-width: 145px;
+                color: var(--dropdown-text);
+                background-color: var(--dropdown-bg);
+                border: 1px solid var(--dropdown-border);
+                border-radius: 5px;
+                box-shadow: 0 5px 20px var(--shadow);
+            }
+
+            .node-pod-action-menu-root.open .menu {
+                display: block;
+            }
+
+            .node-pod-action-menu-root .menu li {
+                align-items: center;
+                display: flex;
+                padding: 8px 10px;
+                margin: 0;
+            }
+
+            .node-pod-action-menu-root .menu li[disabled] {
+                cursor: not-allowed !important;
+                color: var(--disabled-text);
+            }
+
+            .node-pod-action-menu-root .menu li.divider {
+                padding: 0;
+                border-bottom: 1px solid var(--dropdown-divider);
+            }
+
+            .node-pod-action-menu-root .menu li:not(.divider):hover {
+                background-color: var(--dropdown-hover-bg);
+                color: var(--dropdown-hover-text);
+                cursor: pointer;
+            }
+
+            .node-pod-action-menu-root .menu li .icon {
+                display: unset;
+                width: 14px;
+                text-align: center;
+                margin-right: 8px;
+            }
+
         `;
         document.head.appendChild(style);
     }
@@ -270,6 +379,496 @@
             }
         }
         return result;
+    }
+
+    function isNodeDetailPage() {
+        return /\/node\//i.test(window.location.pathname || '');
+    }
+
+    function findNodeDetailPodTables() {
+        if (!isNodeDetailPage()) return [];
+        const tables = Array.from(document.querySelectorAll('table'));
+        return tables.filter((table) => {
+            const tbody = table.querySelector('tbody');
+            if (!tbody) return false;
+            return !!tbody.querySelector('a[href*="/pod/"]');
+        });
+    }
+
+    function extractPodRefFromRow(row) {
+        const link = row ? row.querySelector('a[href*="/pod/"]') : null;
+        if (!link) return null;
+        const href = link.getAttribute('href') || '';
+        const match = href.match(/\/pod\/([^\/?#]+)\/([^\/?#]+)/i);
+        if (!match) return null;
+        return {
+            namespace: decodeURIComponent(match[1]),
+            name: decodeURIComponent(match[2])
+        };
+    }
+
+    async function deletePodResource(ref) {
+        if (!ref || !ref.namespace || !ref.name) {
+            throw new Error('invalid pod ref');
+        }
+
+        const url = `/v1/pods/${encodeURIComponent(ref.namespace)}/${encodeURIComponent(ref.name)}`;
+        const resp = await fetch(url, {
+            method: 'DELETE',
+            credentials: 'same-origin',
+            headers: {
+                'Accept': 'application/json'
+            }
+        });
+
+        if (!resp.ok && resp.status !== 404) {
+            const body = await resp.text();
+            throw new Error(`${ref.namespace}/${ref.name}: ${resp.status} ${body.slice(0, 160)}`);
+        }
+    }
+
+    function getNodePodDataRows(table) {
+        if (!table) return [];
+        const tbody = table.querySelector('tbody');
+        if (!tbody) return [];
+        return Array.from(tbody.querySelectorAll('tr')).filter((row) => {
+            if (row.querySelector('td[colspan]')) return false;
+            return !!extractPodRefFromRow(row);
+        });
+    }
+
+    function closeAllNodePodMenus() {
+        document.querySelectorAll('.node-pod-action-menu-root.open').forEach((el) => el.classList.remove('open'));
+    }
+
+    function getRootStore() {
+        const app = window.$globalApp || window.$nuxt || null;
+        return app && app.$store ? app.$store : null;
+    }
+
+    function findPodResourceInStore(ref) {
+        const store = getRootStore();
+        if (!store || !ref) return null;
+        const getters = store.getters || {};
+
+        const matchesRef = (item) => {
+            const md = item && item.metadata ? item.metadata : {};
+            return md.namespace === ref.namespace && md.name === ref.name;
+        };
+
+        // 1) Try every `<store>/all` getter with common pod type ids.
+        const allGetterNames = Object.keys(getters).filter((k) => /\/all$/.test(k));
+        const typeCandidates = ['pod', 'pods'];
+        for (const getterName of allGetterNames) {
+            const getter = getters[getterName];
+            if (typeof getter !== 'function') continue;
+            for (const typeName of typeCandidates) {
+                let list = [];
+                try {
+                    list = getter(typeName) || [];
+                } catch (e) {
+                    list = [];
+                }
+                const match = Array.isArray(list) ? list.find(matchesRef) : null;
+                if (match) return match;
+            }
+        }
+
+        // 2) Try every `<store>/byId` getter with common pod ids.
+        const byIdGetterNames = Object.keys(getters).filter((k) => /\/byId$/.test(k));
+        const idCandidates = [
+            `${ref.namespace}/${ref.name}`,
+            `${ref.namespace}:${ref.name}`,
+            ref.name
+        ];
+        for (const getterName of byIdGetterNames) {
+            const getter = getters[getterName];
+            if (typeof getter !== 'function') continue;
+            for (const typeName of typeCandidates) {
+                for (const id of idCandidates) {
+                    let item = null;
+                    try {
+                        item = getter(typeName, id);
+                    } catch (e) {
+                        item = null;
+                    }
+                    if (item && matchesRef(item)) return item;
+                }
+            }
+        }
+        return null;
+    }
+
+    async function hydratePodResourceInStore(ref) {
+        const store = getRootStore();
+        if (!store || !ref) return null;
+        const getters = store.getters || {};
+        const storeNames = Object.keys(getters)
+            .filter((k) => /\/schemaFor$/.test(k))
+            .map((k) => k.split('/')[0]);
+        const uniqueStoreNames = Array.from(new Set(storeNames));
+        const idCandidates = [
+            `${ref.namespace}/${ref.name}`,
+            `${ref.namespace}:${ref.name}`,
+            ref.name
+        ];
+        const typeCandidates = ['pod', 'pods'];
+
+        for (const storeName of uniqueStoreNames) {
+            for (const typeName of typeCandidates) {
+                for (const id of idCandidates) {
+                    try {
+                        await store.dispatch(`${storeName}/find`, { type: typeName, id });
+                    } catch (e) {
+                        // Continue trying other store/type/id combinations.
+                    }
+                    const found = findPodResourceInStore(ref);
+                    if (found) return found;
+                }
+            }
+        }
+        return null;
+    }
+
+    async function openNativeDeleteConfirmForRefs(refs) {
+        const store = getRootStore();
+        if (!store || !Array.isArray(refs) || !refs.length) return false;
+        let resources = refs.map(findPodResourceInStore).filter(Boolean);
+        if (resources.length !== refs.length) {
+            for (const ref of refs) {
+                if (resources.find((r) => {
+                    const md = r && r.metadata ? r.metadata : {};
+                    return md.namespace === ref.namespace && md.name === ref.name;
+                })) {
+                    continue;
+                }
+                const hydrated = await hydratePodResourceInStore(ref);
+                if (hydrated) resources.push(hydrated);
+            }
+        }
+        if (!resources.length) return false;
+        // Reset before opening to avoid toggle-state mismatch.
+        store.commit('action-menu/togglePromptRemove', null);
+        store.commit('action-menu/togglePromptRemove', resources);
+        return true;
+    }
+
+    function ensureNodePodGlobalMenuHandler() {
+        if (document.body.dataset.nodePodMenuBound === '1') return;
+        document.body.dataset.nodePodMenuBound = '1';
+        document.addEventListener('click', (event) => {
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+            if (!target.closest('.node-pod-action-menu-root') && !target.closest('.node-pod-op-cell .actions')) {
+                closeAllNodePodMenus();
+            }
+        });
+    }
+
+    function updateNodePodDeleteButtonState(table) {
+        const container = table ? table.parentElement : null;
+        if (!container) return;
+        const deleteBtn = container.querySelector('.node-pod-delete-btn');
+        if (!deleteBtn) return;
+        const selectedTip = container.querySelector('.node-pod-selected-tip');
+
+        const selectedRows = table.querySelectorAll('tbody .node-pod-row-checkbox:checked').length;
+        deleteBtn.disabled = selectedRows === 0;
+        deleteBtn.classList.toggle('role-primary', selectedRows > 0);
+        deleteBtn.classList.toggle('bg-primary', selectedRows > 0);
+        deleteBtn.classList.toggle('role-secondary', selectedRows === 0);
+        if (selectedRows > 0) {
+            deleteBtn.style.setProperty('background-color', '#5f9fd6', 'important');
+            deleteBtn.style.setProperty('border-color', '#5f9fd6', 'important');
+            deleteBtn.style.setProperty('color', '#ffffff', 'important');
+        } else {
+            deleteBtn.style.removeProperty('background-color');
+            deleteBtn.style.removeProperty('border-color');
+            deleteBtn.style.removeProperty('color');
+        }
+        if (selectedTip) {
+            selectedTip.textContent = selectedRows > 0 ? `已选择 ${selectedRows} 项` : '';
+        }
+
+        const allRows = getNodePodDataRows(table);
+        const checkedCount = selectedRows;
+        const selectAll = table.querySelector('thead .node-pod-select-all');
+        if (selectAll) {
+            selectAll.checked = allRows.length > 0 && checkedCount === allRows.length;
+            selectAll.indeterminate = checkedCount > 0 && checkedCount < allRows.length;
+        }
+    }
+
+    function ensureNodePodActionCell(row, table) {
+        let cell = row.querySelector('td.node-pod-op-cell');
+        if (!cell) {
+            cell = document.createElement('td');
+            cell.className = 'text-right node-pod-op-cell';
+            row.appendChild(cell);
+        }
+
+        if (cell.dataset.nodePodBound === '1') return;
+        cell.dataset.nodePodBound = '1';
+
+        const ref = extractPodRefFromRow(row);
+        if (!ref) return;
+
+        const trigger = document.createElement('button');
+        trigger.type = 'button';
+        trigger.className = 'btn btn-sm role-multi-action actions';
+        trigger.setAttribute('aria-haspopup', 'true');
+        trigger.setAttribute('aria-expanded', 'false');
+        trigger.innerHTML = '<i class="icon icon-actions"></i>';
+        trigger.style.setProperty('border', '0', 'important');
+        trigger.style.setProperty('background', 'transparent', 'important');
+        trigger.style.setProperty('box-shadow', 'none', 'important');
+
+        const menuRoot = document.createElement('div');
+        menuRoot.className = 'node-pod-action-menu-root';
+
+        const menu = document.createElement('ul');
+        menu.className = 'list-unstyled menu';
+
+        const podLink = row.querySelector('a[href*="/pod/"]');
+        const podHref = podLink ? (podLink.getAttribute('href') || '') : '';
+
+        const makeAction = (label, icon, onClick, disabled) => {
+            const li = document.createElement('li');
+            if (disabled) li.setAttribute('disabled', 'disabled');
+            const iconNode = document.createElement('i');
+            iconNode.className = icon;
+            const textNode = document.createElement('span');
+            textNode.textContent = label;
+            li.appendChild(iconNode);
+            li.appendChild(textNode);
+            li.addEventListener('click', async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (disabled) return;
+                menuRoot.classList.remove('open');
+                trigger.setAttribute('aria-expanded', 'false');
+                await onClick();
+            });
+            return li;
+        };
+
+        const makeDivider = () => {
+            const li = document.createElement('li');
+            li.className = 'divider';
+            return li;
+        };
+
+        const navigatePodDetail = async () => {
+            if (!podHref) return;
+            window.location.href = podHref;
+        };
+
+        const editConfig = async () => {
+            if (!podHref) return;
+            window.location.href = `${podHref}?mode=edit`;
+        };
+
+        const editYAML = async () => {
+            if (!podHref) return;
+            window.location.href = `${podHref}?as=yaml`;
+        };
+
+        const cloneResource = async () => {
+            if (!podHref) return;
+            window.location.href = `${podHref}?mode=clone`;
+        };
+
+        const downloadYAML = async () => {
+            const url = `/v1/pods/${encodeURIComponent(ref.namespace)}/${encodeURIComponent(ref.name)}`;
+            const resp = await fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
+            if (!resp.ok) throw new Error(`下载失败: ${resp.status}`);
+            const data = await resp.json();
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/yaml;charset=utf-8' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `${ref.name}.yaml`;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+                URL.revokeObjectURL(a.href);
+                a.remove();
+            }, 0);
+        };
+
+        const deleteCurrent = async () => {
+            if (await openNativeDeleteConfirmForRefs([ref])) return;
+            const confirmed = window.confirm(`确认删除 Pod ${ref.namespace}/${ref.name} 吗？`);
+            if (!confirmed) return;
+            try {
+                await deletePodResource(ref);
+                rawPodsCache = null;
+                rawPodsFetchedAt = 0;
+                scheduleProcess(120);
+            } catch (error) {
+                console.error('Delete pod failed:', error);
+                window.alert(`删除失败: ${error.message || error}`);
+            }
+        };
+
+        menu.appendChild(makeAction('Execute Shell', 'icon icon-fw icon-chevron-right', navigatePodDetail, false));
+        menu.appendChild(makeAction('View Logs', 'icon icon-fw icon-chevron-right', navigatePodDetail, false));
+        menu.appendChild(makeDivider());
+        menu.appendChild(makeAction('编辑配置', 'icon icon-edit', editConfig, false));
+        menu.appendChild(makeAction('编辑 YAML', 'icon icon-file', editYAML, false));
+        menu.appendChild(makeAction('克隆', 'icon icon-copy', cloneResource, false));
+        menu.appendChild(makeDivider());
+        menu.appendChild(makeAction('下载 YAML', 'icon icon-download', downloadYAML, false));
+        menu.appendChild(makeAction('删除', 'icon icon-trash', deleteCurrent, false));
+
+        trigger.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const nextOpen = !menuRoot.classList.contains('open');
+            closeAllNodePodMenus();
+            menuRoot.classList.toggle('open', nextOpen);
+            trigger.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+        });
+
+        menuRoot.appendChild(menu);
+        cell.appendChild(trigger);
+        cell.appendChild(menuRoot);
+    }
+
+    function ensureNodePodSelectionCell(row, table) {
+        let cell = row.querySelector('td.node-pod-select-cell');
+        if (!cell) {
+            cell = document.createElement('td');
+            cell.className = 'text-center node-pod-select-cell';
+            row.insertBefore(cell, row.firstElementChild || null);
+        }
+
+        let checkbox = cell.querySelector('input.node-pod-row-checkbox');
+        if (!checkbox) {
+            checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.className = 'node-pod-row-checkbox';
+            checkbox.addEventListener('change', () => updateNodePodDeleteButtonState(table));
+            cell.appendChild(checkbox);
+        }
+    }
+
+    function ensureNodePodHeaderColumns(table) {
+        const headerRow = table.querySelector('thead tr');
+        if (!headerRow) return;
+
+        let selectHeader = headerRow.querySelector('th.node-pod-select-header');
+        if (!selectHeader) {
+            selectHeader = document.createElement('th');
+            selectHeader.className = 'node-pod-select-header';
+            const selectAll = document.createElement('input');
+            selectAll.type = 'checkbox';
+            selectAll.className = 'node-pod-select-all';
+            selectAll.addEventListener('change', () => {
+                const rows = getNodePodDataRows(table);
+                rows.forEach((row) => {
+                    const cb = row.querySelector('.node-pod-row-checkbox');
+                    if (cb) cb.checked = selectAll.checked;
+                });
+                updateNodePodDeleteButtonState(table);
+            });
+            selectHeader.appendChild(selectAll);
+            headerRow.insertBefore(selectHeader, headerRow.firstElementChild || null);
+        }
+
+        let opHeader = headerRow.querySelector('th.node-pod-op-header');
+        if (!opHeader) {
+            opHeader = document.createElement('th');
+            opHeader.className = 'node-pod-op-header';
+            opHeader.textContent = '';
+            headerRow.appendChild(opHeader);
+        }
+    }
+
+    function ensureNodePodBulkActions(table) {
+        const container = table ? table.parentElement : null;
+        if (!container) return;
+
+        let bar = container.querySelector('.node-pod-actions-bar');
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.className = 'node-pod-actions-bar';
+            container.insertBefore(bar, table);
+        }
+
+        let deleteBtn = bar.querySelector('.node-pod-delete-btn');
+        if (!deleteBtn) {
+            deleteBtn = document.createElement('button');
+            deleteBtn.type = 'button';
+            deleteBtn.className = 'btn role-secondary node-pod-delete-btn';
+            deleteBtn.innerHTML = '<i class="icon icon-trash"></i><span>删除</span>';
+            deleteBtn.disabled = true;
+            deleteBtn.addEventListener('click', async () => {
+                const rows = getNodePodDataRows(table);
+                const selectedRefs = rows.map((row) => {
+                    const cb = row.querySelector('.node-pod-row-checkbox');
+                    if (!cb || !cb.checked) return null;
+                    return extractPodRefFromRow(row);
+                }).filter(Boolean);
+
+                if (!selectedRefs.length) return;
+                if (await openNativeDeleteConfirmForRefs(selectedRefs)) return;
+                const confirmed = window.confirm(`确认删除已选择的 ${selectedRefs.length} 个 Pod 吗？`);
+                if (!confirmed) return;
+
+                let success = 0;
+                const errors = [];
+                for (const ref of selectedRefs) {
+                    try {
+                        await deletePodResource(ref);
+                        success += 1;
+                    } catch (error) {
+                        errors.push(`${ref.namespace}/${ref.name}: ${error.message || error}`);
+                    }
+                }
+
+                rawPodsCache = null;
+                rawPodsFetchedAt = 0;
+                scheduleProcess(150);
+
+                if (errors.length) {
+                    console.error('Batch delete pod partial failures:', errors);
+                    window.alert(`已删除 ${success}/${selectedRefs.length}，失败 ${errors.length} 个。\n${errors.slice(0, 3).join('\n')}`);
+                }
+            });
+            bar.appendChild(deleteBtn);
+        }
+
+        let selectedTip = bar.querySelector('.node-pod-selected-tip');
+        if (!selectedTip) {
+            selectedTip = document.createElement('span');
+            selectedTip.className = 'node-pod-selected-tip';
+            bar.appendChild(selectedTip);
+        }
+    }
+
+    function enhanceNodeDetailPodTable(table) {
+        if (!ENABLE_NODE_POD_ENHANCEMENTS) return;
+        if (!isNodeDetailPage() || !table) return;
+        ensureNodePodGlobalMenuHandler();
+        ensureNodePodHeaderColumns(table);
+        ensureNodePodBulkActions(table);
+
+        const rows = getNodePodDataRows(table);
+        rows.forEach((row) => {
+            ensureNodePodSelectionCell(row, table);
+            ensureNodePodActionCell(row, table);
+        });
+
+        updateNodePodDeleteButtonState(table);
+    }
+
+    function processNodeDetailPodEnhancements() {
+        if (!ENABLE_NODE_POD_ENHANCEMENTS) return;
+        const tables = findNodeDetailPodTables();
+        if (!tables.length) return;
+        tables.forEach((table) => {
+            enhanceNodeDetailPodTable(table);
+        });
     }
 
     function isNodeTable(table) {
@@ -1472,6 +2071,7 @@
                 }
                 enableMetricSorting(table);
             }
+            enhanceNodeDetailPodTable(table);
         });
     }
 
@@ -1495,6 +2095,7 @@
         lastProcessStartedAt = Date.now();
         suppressMutationsUntil = lastProcessStartedAt + 800;
         try {
+            processNodeDetailPodEnhancements();
             await processPodsPage();
             await processNodesPage();
         } finally {
