@@ -68,6 +68,65 @@
         });
     }
 
+    function getCurrentLocale() {
+        const store = getRootStore();
+        const getters = store && store.getters ? store.getters : {};
+        const getterCandidates = ['i18n/locale', 'prefs/locale', 'locale/current', 'lang/current'];
+        for (const key of getterCandidates) {
+            const value = getters[key];
+            if (typeof value === 'string' && value.trim()) return value.trim();
+        }
+
+        const stateCandidates = [
+            store && store.state && store.state.i18n ? store.state.i18n.locale : '',
+            store && store.state && store.state.prefs ? store.state.prefs.locale : '',
+            document.documentElement ? document.documentElement.lang : '',
+            navigator.language || ''
+        ];
+        for (const value of stateCandidates) {
+            if (typeof value === 'string' && value.trim()) return value.trim();
+        }
+        return '';
+    }
+
+    function isEnglishLocale() {
+        return /^en(?:[-_]|$)/i.test(getCurrentLocale());
+    }
+
+    function getNodePodTexts() {
+        if (isEnglishLocale()) {
+            return {
+                deleteLabel: 'Delete',
+                selectedTip: (count) => `Selected ${count}`,
+                confirmDeleteOne: (ref) => `Confirm delete Pod ${ref.namespace}/${ref.name}?`,
+                confirmDeleteBatch: (count) => `Confirm delete ${count} selected Pods?`,
+                deleteFailed: (error) => `Delete failed: ${error}`,
+                batchDeletePartial: (success, total, failed, details) => `Deleted ${success}/${total}, failed ${failed}.\n${details}`,
+                executeShell: 'Execute Shell',
+                viewLogs: 'View Logs',
+                editConfig: 'Edit Config',
+                editYAML: 'Edit YAML',
+                clone: 'Clone',
+                downloadYAML: 'Download YAML'
+            };
+        }
+
+        return {
+            deleteLabel: '删除',
+            selectedTip: (count) => `已选择 ${count} 项`,
+            confirmDeleteOne: (ref) => `确认删除 Pod ${ref.namespace}/${ref.name} 吗？`,
+            confirmDeleteBatch: (count) => `确认删除已选择的 ${count} 个 Pod 吗？`,
+            deleteFailed: (error) => `删除失败: ${error}`,
+            batchDeletePartial: (success, total, failed, details) => `已删除 ${success}/${total}，失败 ${failed} 个。\n${details}`,
+            executeShell: '执行终端',
+            viewLogs: '查看日志',
+            editConfig: '编辑配置',
+            editYAML: '编辑 YAML',
+            clone: '克隆',
+            downloadYAML: '下载 YAML'
+        };
+    }
+
     function injectStyles() {
         if (document.getElementById('custom-pod-metrics-styles')) return;
 
@@ -152,6 +211,7 @@
             .metrics-sortable .sort .faded {
                 opacity: 0.3 !important;
             }
+
 
             .node-req-lim-summary {
                 margin-top: 6px;
@@ -303,10 +363,10 @@
             }
 
             .node-pod-action-menu-root .menu {
-                position: absolute;
+                position: fixed;
                 display: none;
-                top: 22px;
-                right: 0;
+                top: 0;
+                left: 0;
                 z-index: 41;
                 min-width: 145px;
                 color: var(--dropdown-text);
@@ -348,6 +408,52 @@
                 width: 14px;
                 text-align: center;
                 margin-right: 8px;
+            }
+
+            .node-pod-floating-menu {
+                position: fixed;
+                top: 0;
+                left: 0;
+                z-index: 9999;
+                min-width: 145px;
+                color: var(--dropdown-text);
+                background-color: var(--dropdown-bg);
+                border: 1px solid var(--dropdown-border);
+                border-radius: 5px;
+                box-shadow: 0 5px 20px var(--shadow);
+                margin: 0;
+                padding: 0;
+                list-style: none;
+            }
+
+            .node-pod-floating-menu li {
+                align-items: center;
+                display: flex;
+                padding: 8px 10px;
+                margin: 0;
+            }
+
+            .node-pod-floating-menu li.divider {
+                padding: 0;
+                border-bottom: 1px solid var(--dropdown-divider);
+            }
+
+            .node-pod-floating-menu li:not(.divider):hover {
+                background-color: var(--dropdown-hover-bg);
+                color: var(--dropdown-hover-text);
+                cursor: pointer;
+            }
+
+            .node-pod-floating-menu li .icon {
+                display: unset;
+                width: 14px;
+                text-align: center;
+                margin-right: 8px;
+            }
+
+            .node-pod-op-cell,
+            .node-pod-op-cell .node-pod-action-menu-root {
+                overflow: visible !important;
             }
 
         `;
@@ -439,6 +545,8 @@
 
     function closeAllNodePodMenus() {
         document.querySelectorAll('.node-pod-action-menu-root.open').forEach((el) => el.classList.remove('open'));
+        document.querySelectorAll('.node-pod-floating-menu').forEach((el) => el.remove());
+        document.querySelectorAll('.node-pod-op-cell .actions[aria-expanded="true"]').forEach((el) => el.setAttribute('aria-expanded', 'false'));
     }
 
     function getRootStore() {
@@ -559,7 +667,7 @@
         document.addEventListener('click', (event) => {
             const target = event.target;
             if (!(target instanceof Element)) return;
-            if (!target.closest('.node-pod-action-menu-root') && !target.closest('.node-pod-op-cell .actions')) {
+            if (!target.closest('.node-pod-action-menu-root') && !target.closest('.node-pod-op-cell .actions') && !target.closest('.node-pod-floating-menu')) {
                 closeAllNodePodMenus();
             }
         });
@@ -568,6 +676,7 @@
     function updateNodePodDeleteButtonState(table) {
         const container = table ? table.parentElement : null;
         if (!container) return;
+        const texts = getNodePodTexts();
         const deleteBtn = container.querySelector('.node-pod-delete-btn');
         if (!deleteBtn) return;
         const selectedTip = container.querySelector('.node-pod-selected-tip');
@@ -587,7 +696,7 @@
             deleteBtn.style.removeProperty('color');
         }
         if (selectedTip) {
-            selectedTip.textContent = selectedRows > 0 ? `已选择 ${selectedRows} 项` : '';
+            selectedTip.textContent = selectedRows > 0 ? texts.selectedTip(selectedRows) : '';
         }
 
         const allRows = getNodePodDataRows(table);
@@ -598,7 +707,6 @@
             selectAll.indeterminate = checkedCount > 0 && checkedCount < allRows.length;
         }
     }
-
     function ensureNodePodActionCell(row, table) {
         let cell = row.querySelector('td.node-pod-op-cell');
         if (!cell) {
@@ -626,13 +734,33 @@
         const menuRoot = document.createElement('div');
         menuRoot.className = 'node-pod-action-menu-root';
 
-        const menu = document.createElement('ul');
-        menu.className = 'list-unstyled menu';
+        const positionMenuNearTrigger = (menu) => {
+            const rect = trigger.getBoundingClientRect();
+            const menuWidth = Math.max(145, menu.offsetWidth || 145);
+            const menuHeight = Math.max(220, menu.offsetHeight || 220);
+            const gap = 4;
+            let left = rect.right - menuWidth;
+            let top = rect.bottom + gap;
+
+            if (left < 8) left = 8;
+            if (left + menuWidth > window.innerWidth - 8) left = window.innerWidth - menuWidth - 8;
+            if (top + menuHeight > window.innerHeight - 8) top = rect.top - menuHeight - gap;
+            if (top < 8) top = 8;
+
+            menu.style.left = `${Math.round(left)}px`;
+            menu.style.top = `${Math.round(top)}px`;
+        };
 
         const podLink = row.querySelector('a[href*="/pod/"]');
         const podHref = podLink ? (podLink.getAttribute('href') || '') : '';
 
-        const makeAction = (label, icon, onClick, disabled) => {
+        const buildFloatingMenu = () => {
+            const menu = document.createElement('ul');
+            menu.className = 'list-unstyled menu node-pod-floating-menu';
+            return menu;
+        };
+
+        const makeAction = (menu, label, icon, onClick, disabled) => {
             const li = document.createElement('li');
             if (disabled) li.setAttribute('disabled', 'disabled');
             const iconNode = document.createElement('i');
@@ -645,8 +773,7 @@
                 e.preventDefault();
                 e.stopPropagation();
                 if (disabled) return;
-                menuRoot.classList.remove('open');
-                trigger.setAttribute('aria-expanded', 'false');
+                closeAllNodePodMenus();
                 await onClick();
             });
             return li;
@@ -681,7 +808,7 @@
         const downloadYAML = async () => {
             const url = `/v1/pods/${encodeURIComponent(ref.namespace)}/${encodeURIComponent(ref.name)}`;
             const resp = await fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
-            if (!resp.ok) throw new Error(`下载失败: ${resp.status}`);
+            if (!resp.ok) throw new Error(`download failed: ${resp.status}`);
             const data = await resp.json();
             const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/yaml;charset=utf-8' });
             const a = document.createElement('a');
@@ -696,8 +823,9 @@
         };
 
         const deleteCurrent = async () => {
+            const texts = getNodePodTexts();
             if (await openNativeDeleteConfirmForRefs([ref])) return;
-            const confirmed = window.confirm(`确认删除 Pod ${ref.namespace}/${ref.name} 吗？`);
+            const confirmed = window.confirm(texts.confirmDeleteOne(ref));
             if (!confirmed) return;
             try {
                 await deletePodResource(ref);
@@ -706,30 +834,34 @@
                 scheduleProcess(120);
             } catch (error) {
                 console.error('Delete pod failed:', error);
-                window.alert(`删除失败: ${error.message || error}`);
+                window.alert(texts.deleteFailed(error.message || error));
             }
         };
-
-        menu.appendChild(makeAction('Execute Shell', 'icon icon-fw icon-chevron-right', navigatePodDetail, false));
-        menu.appendChild(makeAction('View Logs', 'icon icon-fw icon-chevron-right', navigatePodDetail, false));
-        menu.appendChild(makeDivider());
-        menu.appendChild(makeAction('编辑配置', 'icon icon-edit', editConfig, false));
-        menu.appendChild(makeAction('编辑 YAML', 'icon icon-file', editYAML, false));
-        menu.appendChild(makeAction('克隆', 'icon icon-copy', cloneResource, false));
-        menu.appendChild(makeDivider());
-        menu.appendChild(makeAction('下载 YAML', 'icon icon-download', downloadYAML, false));
-        menu.appendChild(makeAction('删除', 'icon icon-trash', deleteCurrent, false));
 
         trigger.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            const nextOpen = !menuRoot.classList.contains('open');
+            const alreadyOpen = trigger.getAttribute('aria-expanded') === 'true';
             closeAllNodePodMenus();
-            menuRoot.classList.toggle('open', nextOpen);
-            trigger.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+            if (alreadyOpen) return;
+
+            const texts = getNodePodTexts();
+            const menu = buildFloatingMenu();
+            menu.appendChild(makeAction(menu, texts.executeShell, 'icon icon-fw icon-chevron-right', navigatePodDetail, false));
+            menu.appendChild(makeAction(menu, texts.viewLogs, 'icon icon-fw icon-chevron-right', navigatePodDetail, false));
+            menu.appendChild(makeDivider());
+            menu.appendChild(makeAction(menu, texts.editConfig, 'icon icon-edit', editConfig, false));
+            menu.appendChild(makeAction(menu, texts.editYAML, 'icon icon-file', editYAML, false));
+            menu.appendChild(makeAction(menu, texts.clone, 'icon icon-copy', cloneResource, false));
+            menu.appendChild(makeDivider());
+            menu.appendChild(makeAction(menu, texts.downloadYAML, 'icon icon-download', downloadYAML, false));
+            menu.appendChild(makeAction(menu, texts.deleteLabel, 'icon icon-trash', deleteCurrent, false));
+
+            document.body.appendChild(menu);
+            positionMenuNearTrigger(menu);
+            trigger.setAttribute('aria-expanded', 'true');
         });
 
-        menuRoot.appendChild(menu);
         cell.appendChild(trigger);
         cell.appendChild(menuRoot);
     }
@@ -787,6 +919,7 @@
     function ensureNodePodBulkActions(table) {
         const container = table ? table.parentElement : null;
         if (!container) return;
+        const texts = getNodePodTexts();
 
         let bar = container.querySelector('.node-pod-actions-bar');
         if (!bar) {
@@ -800,7 +933,7 @@
             deleteBtn = document.createElement('button');
             deleteBtn.type = 'button';
             deleteBtn.className = 'btn role-secondary node-pod-delete-btn';
-            deleteBtn.innerHTML = '<i class="icon icon-trash"></i><span>删除</span>';
+            deleteBtn.innerHTML = `<i class="icon icon-trash"></i><span>${texts.deleteLabel}</span>`;
             deleteBtn.disabled = true;
             deleteBtn.addEventListener('click', async () => {
                 const rows = getNodePodDataRows(table);
@@ -812,7 +945,7 @@
 
                 if (!selectedRefs.length) return;
                 if (await openNativeDeleteConfirmForRefs(selectedRefs)) return;
-                const confirmed = window.confirm(`确认删除已选择的 ${selectedRefs.length} 个 Pod 吗？`);
+                const confirmed = window.confirm(texts.confirmDeleteBatch(selectedRefs.length));
                 if (!confirmed) return;
 
                 let success = 0;
@@ -832,11 +965,13 @@
 
                 if (errors.length) {
                     console.error('Batch delete pod partial failures:', errors);
-                    window.alert(`已删除 ${success}/${selectedRefs.length}，失败 ${errors.length} 个。\n${errors.slice(0, 3).join('\n')}`);
+                    window.alert(texts.batchDeletePartial(success, selectedRefs.length, errors.length, errors.slice(0, 3).join('\n')));
                 }
             });
             bar.appendChild(deleteBtn);
         }
+        const deleteLabelNode = deleteBtn.querySelector('span');
+        if (deleteLabelNode) deleteLabelNode.textContent = texts.deleteLabel;
 
         let selectedTip = bar.querySelector('.node-pod-selected-tip');
         if (!selectedTip) {
