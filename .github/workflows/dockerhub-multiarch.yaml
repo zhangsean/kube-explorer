@@ -1,0 +1,88 @@
+name: Docker Hub Multi-Arch
+
+on:
+  push:
+    branches:
+      - "**"
+
+env:
+  IMAGE_NAME: zhangsean/kube-explorer
+  UPX_VERSION: 4.2.4
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install UPX
+        run: |
+          set -euo pipefail
+          curl -sSL "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-amd64_linux.tar.xz" -o /tmp/upx.tar.xz
+          tar -xJf /tmp/upx.tar.xz -C /tmp
+          sudo install -m 0755 "/tmp/upx-${UPX_VERSION}-amd64_linux/upx" /usr/local/bin/upx
+          upx --version
+
+      - name: Build and compress Linux binaries
+        run: |
+          set -euo pipefail
+          mkdir -p package
+
+          VERSION="${GITHUB_REF_NAME}"
+          COMMIT="${GITHUB_SHA}"
+          LDFLAGS="-s -w -buildid= -X github.com/cnrancher/kube-explorer/internal/version.Version=${VERSION} -X github.com/cnrancher/kube-explorer/internal/version.GitCommit=${COMMIT}"
+
+          for arch in amd64 arm64; do
+            output="package/kube-explorer-linux-${arch}"
+            echo "==> Building linux/${arch}: ${output}"
+            CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" \
+              go build -p 1 -tags embed -trimpath -ldflags "${LDFLAGS}" -o "${output}" .
+
+            echo "==> UPX compressing linux/${arch}: ${output}"
+            upx --best --lzma "${output}"
+          done
+
+          ls -lh package/kube-explorer-linux-*
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: package
+          platforms: linux/amd64,linux/arm64
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          push: true
