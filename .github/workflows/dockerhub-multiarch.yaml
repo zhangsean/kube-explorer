@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - "**"
+  release:
+    types:
+      - published
 
 env:
   IMAGE_NAME: zhangsean/kube-explorer
@@ -13,13 +16,14 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -38,9 +42,9 @@ jobs:
       - name: Build and compress Linux binaries
         run: |
           set -euo pipefail
-          mkdir -p package
+          mkdir -p package dist
 
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}"
           COMMIT="${GITHUB_SHA}"
           LDFLAGS="-s -w -buildid= -X github.com/cnrancher/kube-explorer/internal/version.Version=${VERSION} -X github.com/cnrancher/kube-explorer/internal/version.GitCommit=${COMMIT}"
 
@@ -52,9 +56,12 @@ jobs:
 
             echo "==> UPX compressing linux/${arch}: ${output}"
             upx --best --lzma "${output}"
+
+            cp "${output}" "dist/kube-explorer-linux-${arch}.upx"
           done
 
           ls -lh package/kube-explorer-linux-*
+          ls -lh dist/kube-explorer-linux-*.upx
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -77,6 +84,7 @@ jobs:
             type=ref,event=branch
             type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -86,3 +94,10 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           tags: ${{ steps.meta.outputs.tags }}
           push: true
+
+      - name: Upload compressed binaries to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: dist/kube-explorer-linux-*.upx
