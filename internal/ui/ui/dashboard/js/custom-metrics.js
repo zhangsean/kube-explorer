@@ -16,8 +16,8 @@
     let nodeResourceSummaryCache = {};
     let lastFetchTime = 0;
     let lastNodeFetchTime = 0;
-    const CACHE_DURATION = 3000;
-    const REFRESH_INTERVAL = 10000;
+    const CACHE_DURATION = 30000;
+    const REFRESH_INTERVAL = 30000;
     const ENABLE_NODE_POD_ENHANCEMENTS = true;
     const MIN_PROCESS_GAP = 700;
     let processTimer = null;
@@ -41,7 +41,7 @@
             .trim()
             .toLowerCase()
             .replace(/\s+/g, '')
-            .replace(/[():\-_/]/g, '');
+            .replace(/[\u0028\u0029\u003a\uff1a\uff0c,\uff08\uff09\-_/]/g, '');
     }
 
     function getTableHeaderTexts(table) {
@@ -661,6 +661,52 @@
         return true;
     }
 
+    async function getPodResourceForModal(ref) {
+        if (!ref) return null;
+        return findPodResourceInStore(ref) || await hydratePodResourceInStore(ref);
+    }
+
+    function getDefaultContainerName(pod) {
+        const containers = pod && pod.spec && Array.isArray(pod.spec.containers) ? pod.spec.containers : [];
+        const preferred = containers.find((container) => container && container.name && container.name !== 'istio-proxy');
+        return (preferred && preferred.name) || (containers[0] && containers[0].name) || '';
+    }
+
+    async function openPodModal(ref, mode) {
+        const pod = await getPodResourceForModal(ref);
+        if (!pod) return false;
+
+        const containerName = getDefaultContainerName(pod);
+        if (mode === 'shell' && typeof pod.openShell === 'function') {
+            pod.openShell(containerName);
+            return true;
+        }
+        if (mode === 'logs' && typeof pod.openLogs === 'function') {
+            pod.openLogs(containerName);
+            return true;
+        }
+
+        const store = getRootStore();
+        const app = window.$globalApp || window.$nuxt || null;
+        const dispatch = (app && app.$store && app.$store.dispatch) || (store && store.dispatch);
+        if (typeof dispatch !== 'function') return false;
+
+        const id = pod.id || `${ref.namespace}/${ref.name}`;
+        const label = pod.nameDisplay || ref.name;
+        const isShell = mode === 'shell';
+        await dispatch('wm/open', {
+            id: `${id}-${isShell ? 'shell' : 'logs'}`,
+            label,
+            icon: isShell ? 'terminal' : 'file',
+            component: isShell ? 'ContainerShell' : 'ContainerLogs',
+            attrs: {
+                pod,
+                initialContainer: containerName
+            }
+        }, { root: true });
+        return true;
+    }
+
     function ensureNodePodGlobalMenuHandler() {
         if (document.body.dataset.nodePodMenuBound === '1') return;
         document.body.dataset.nodePodMenuBound = '1';
@@ -785,24 +831,38 @@
             return li;
         };
 
+        const openPodWindow = async (url) => {
+            if (!url) return;
+            const opened = window.open(url, '_blank', 'noopener');
+            if (opened) {
+                opened.opener = null;
+            }
+        };
+
         const navigatePodDetail = async () => {
-            if (!podHref) return;
-            window.location.href = podHref;
+            await openPodWindow(podHref);
+        };
+
+        const openShellModal = async () => {
+            if (await openPodModal(ref, 'shell')) return;
+            await navigatePodDetail();
+        };
+
+        const openLogsModal = async () => {
+            if (await openPodModal(ref, 'logs')) return;
+            await navigatePodDetail();
         };
 
         const editConfig = async () => {
-            if (!podHref) return;
-            window.location.href = `${podHref}?mode=edit`;
+            await openPodWindow(`${podHref}?mode=edit`);
         };
 
         const editYAML = async () => {
-            if (!podHref) return;
-            window.location.href = `${podHref}?as=yaml`;
+            await openPodWindow(`${podHref}?as=yaml`);
         };
 
         const cloneResource = async () => {
-            if (!podHref) return;
-            window.location.href = `${podHref}?mode=clone`;
+            await openPodWindow(`${podHref}?mode=clone`);
         };
 
         const downloadYAML = async () => {
@@ -847,8 +907,8 @@
 
             const texts = getNodePodTexts();
             const menu = buildFloatingMenu();
-            menu.appendChild(makeAction(menu, texts.executeShell, 'icon icon-fw icon-chevron-right', navigatePodDetail, false));
-            menu.appendChild(makeAction(menu, texts.viewLogs, 'icon icon-fw icon-chevron-right', navigatePodDetail, false));
+            menu.appendChild(makeAction(menu, texts.executeShell, 'icon icon-fw icon-chevron-right', openShellModal, false));
+            menu.appendChild(makeAction(menu, texts.viewLogs, 'icon icon-fw icon-chevron-right', openLogsModal, false));
             menu.appendChild(makeDivider());
             menu.appendChild(makeAction(menu, texts.editConfig, 'icon icon-edit', editConfig, false));
             menu.appendChild(makeAction(menu, texts.editYAML, 'icon icon-file', editYAML, false));
@@ -1012,9 +1072,13 @@
         const hasName = hasAnyHeader(headerTexts, ['name', '名称']);
         const hasOS = hasAnyHeader(headerTexts, ['os', '操作系统']);
         const hasCPU = hasAnyHeader(headerTexts, ['cpu']);
+        const hasNameZh = hasAnyHeader(headerTexts, ['\u540d\u79f0']);
+        const hasOSZh = hasAnyHeader(headerTexts, ['\u64cd\u4f5c\u7cfb\u7edf']);
+        const hasRAMZh = hasAnyHeader(headerTexts, ['\u5185\u5b58', '\u5185\u5b58ram']);
+        const hasPodsZh = hasAnyHeader(headerTexts, ['pod\u6570', 'pod\u6570\u91cf']);
         const hasRAM = hasAnyHeader(headerTexts, ['ram', 'memory', '内存']);
         const hasPods = hasAnyHeader(headerTexts, ['pods', 'pod', 'pods数', 'pod数量']);
-        if (hasName && hasOS && hasCPU && hasRAM && hasPods) return true;
+        if ((hasName || hasNameZh) && (hasOS || hasOSZh) && hasCPU && (hasRAM || hasRAMZh) && (hasPods || hasPodsZh)) return true;
         const nodeLinks = table.querySelectorAll('tbody a[href*="/node/"]');
         return nodeLinks.length > 0;
     }

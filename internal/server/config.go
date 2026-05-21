@@ -14,6 +14,7 @@ import (
 	"github.com/rancher/steve/pkg/server/router"
 	"github.com/rancher/wrangler/v3/pkg/kubeconfig"
 	"github.com/rancher/wrangler/v3/pkg/ratelimit"
+	"github.com/sirupsen/logrus"
 
 	"github.com/cnrancher/kube-explorer/internal/config"
 	"github.com/cnrancher/kube-explorer/internal/resources/cluster"
@@ -64,7 +65,7 @@ func ToServer(ctx context.Context, c *cli.Config, sqlCache bool) (*server.Server
 		Router: func(h router.Handlers) http.Handler {
 			return handleProxyHeader(
 				rewriteLocalCluster(
-					router.Routes(h),
+					optimizeListRequests(router.Routes(h)),
 				),
 			)
 		},
@@ -90,7 +91,12 @@ func ToServer(ctx context.Context, c *cli.Config, sqlCache bool) (*server.Server
 			}
 		},
 	})
-	return steveServer, controllers.Start(ctx)
+	go func() {
+		if err := controllers.Start(ctx); err != nil {
+			logrus.Errorf("failed to start controllers: %v", err)
+		}
+	}()
+	return steveServer, nil
 }
 
 func rewriteLocalCluster(next http.Handler) http.Handler {
