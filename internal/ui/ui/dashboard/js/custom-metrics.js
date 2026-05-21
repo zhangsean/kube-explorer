@@ -4,8 +4,8 @@
     const CONFIG = {
         resourceType: 'pod',
         columns: [
-            { key: 'cpuUsage', label: 'CPU', width: '100px' },
-            { key: 'memoryUsage', label: 'RAM', width: '100px' }
+            { key: 'cpuUsage', label: 'CPU', width: '150px' },
+            { key: 'memoryUsage', label: 'RAM', width: '150px' }
         ]
     };
 
@@ -21,6 +21,7 @@
     const ENABLE_NODE_POD_ENHANCEMENTS = true;
     const MIN_PROCESS_GAP = 700;
     let processTimer = null;
+    let metricHeaderSortBound = false;
     let isProcessing = false;
     let pendingProcess = false;
     let lastProcessStartedAt = 0;
@@ -112,18 +113,18 @@
         }
 
         return {
-            deleteLabel: '删除',
-            selectedTip: (count) => `已选择 ${count} 项`,
-            confirmDeleteOne: (ref) => `确认删除 Pod ${ref.namespace}/${ref.name} 吗？`,
-            confirmDeleteBatch: (count) => `确认删除已选择的 ${count} 个 Pod 吗？`,
-            deleteFailed: (error) => `删除失败: ${error}`,
-            batchDeletePartial: (success, total, failed, details) => `已删除 ${success}/${total}，失败 ${failed} 个。\n${details}`,
-            executeShell: '执行终端',
-            viewLogs: '查看日志',
-            editConfig: '编辑配置',
-            editYAML: '编辑 YAML',
-            clone: '克隆',
-            downloadYAML: '下载 YAML'
+            deleteLabel: '\u5220\u9664',
+            selectedTip: (count) => `\u5df2\u9009\u62e9 ${count} \u9879`,
+            confirmDeleteOne: (ref) => `\u786e\u8ba4\u5220\u9664 Pod ${ref.namespace}/${ref.name} \u5417\uff1f`,
+            confirmDeleteBatch: (count) => `\u786e\u8ba4\u5220\u9664\u5df2\u9009\u62e9\u7684 ${count} \u4e2a Pod \u5417\uff1f`,
+            deleteFailed: (error) => `\u5220\u9664\u5931\u8d25: ${error}`,
+            batchDeletePartial: (success, total, failed, details) => `\u5df2\u5220\u9664 ${success}/${total}\uff0c\u5931\u8d25 ${failed} \u4e2a\u3002\n${details}`,
+            executeShell: '\u6267\u884c\u7ec8\u7aef',
+            viewLogs: '\u67e5\u770b\u65e5\u5fd7',
+            editConfig: '\u7f16\u8f91\u914d\u7f6e',
+            editYAML: '\u7f16\u8f91 YAML',
+            clone: '\u514b\u9686',
+            downloadYAML: '\u4e0b\u8f7d YAML'
         };
     }
 
@@ -138,18 +139,33 @@
                 flex-direction: column;
                 align-items: flex-start;
                 gap: 3px;
-                min-width: 170px;
+                width: 150px;
+                min-width: 0;
+                max-width: 150px;
+                overflow: hidden;
+            }
+
+            th[data-column-key="cpuUsage"],
+            th[data-column-key="memoryUsage"],
+            td[data-column-key="cpuUsage"],
+            td[data-column-key="memoryUsage"],
+            th.metrics-sortable {
+                width: 150px !important;
+                min-width: 150px !important;
+                max-width: 150px !important;
+                box-sizing: border-box !important;
             }
 
             .metrics-main-line {
                 display: flex;
                 align-items: center;
-                gap: 8px;
+                gap: 4px;
                 width: 100%;
             }
 
             .metrics-progress-bar {
                 width: 82px;
+                flex: 0 0 82px;
                 height: 14px;
                 background-color: #c7ccd8;
                 border-radius: 3px;
@@ -179,7 +195,7 @@
             }
 
             .metrics-value {
-                min-width: 42px;
+                min-width: 34px;
                 font-weight: 500;
                 color: #2f3640;
                 font-size: 13px;
@@ -190,6 +206,9 @@
                 color: #8a93a3;
                 margin-left: 2px;
                 white-space: nowrap;
+                max-width: 148px;
+                overflow: hidden;
+                text-overflow: ellipsis;
             }
 
             .metrics-sortable .sort {
@@ -463,11 +482,11 @@
     function isPodTable(table) {
         const headerTexts = getTableHeaderTexts(table);
         if (!headerTexts.length) return false;
-        const hasName = hasAnyHeader(headerTexts, ['name', '名称']);
-        const hasReady = hasAnyHeader(headerTexts, ['ready', '就绪']);
-        const hasRestarts = hasAnyHeader(headerTexts, ['restarts', '重启', '重启次数']);
-        const hasIP = hasAnyHeader(headerTexts, ['ip', 'podip', '内部ip']);
-        const hasNode = hasAnyHeader(headerTexts, ['node', '节点']);
+        const hasName = hasAnyHeader(headerTexts, ['name', '\u540d\u79f0']);
+        const hasReady = hasAnyHeader(headerTexts, ['ready', '\u5c31\u7eea']);
+        const hasRestarts = hasAnyHeader(headerTexts, ['restarts', '\u91cd\u542f', '\u91cd\u542f\u6b21\u6570']);
+        const hasIP = hasAnyHeader(headerTexts, ['ip', 'podip', '\u5185\u90e8ip']);
+        const hasNode = hasAnyHeader(headerTexts, ['node', '\u8282\u70b9']);
         // Restrict to pod-style list tables to avoid deployment list pages.
         if (hasName && hasReady && hasRestarts && hasIP && hasNode) return true;
 
@@ -495,9 +514,7 @@
         if (!isNodeDetailPage()) return [];
         const tables = Array.from(document.querySelectorAll('table'));
         return tables.filter((table) => {
-            const tbody = table.querySelector('tbody');
-            if (!tbody) return false;
-            return !!tbody.querySelector('a[href*="/pod/"]');
+            return getTableBodies(table).some((tbody) => !!tbody.querySelector('a[href*="/pod/"]'));
         });
     }
 
@@ -535,12 +552,116 @@
 
     function getNodePodDataRows(table) {
         if (!table) return [];
-        const tbody = table.querySelector('tbody');
-        if (!tbody) return [];
-        return Array.from(tbody.querySelectorAll('tr')).filter((row) => {
-            if (row.querySelector('td[colspan]')) return false;
-            return !!extractPodRefFromRow(row);
+        return getTableBodies(table).flatMap((tbody) => Array.from(tbody.querySelectorAll('tr'))).filter((row) => {
+            return isPodDataRow(row);
         });
+    }
+
+    function getTableBodies(table) {
+        if (!table) return [];
+        const bodies = Array.from(table.querySelectorAll('tbody'));
+        return bodies.length ? bodies : [];
+    }
+
+    function isGroupedPodTable(table) {
+        const bodies = getTableBodies(table);
+        if (bodies.length > 1) return true;
+        return bodies.some((tbody) => Array.from(tbody.querySelectorAll('tr')).some((row) => isPodGroupRow(row)));
+    }
+
+    function isPodGroupRow(row) {
+        if (!row) return true;
+        const className = (row.className || '').toString().toLowerCase();
+        const rowText = metricCellText(row).toLowerCase();
+        if (className.includes('sub-row') || className.includes('state-description')) return false;
+        if (rowText.includes('containers with unready status')) return false;
+        if (row.querySelector('td[colspan]')) return true;
+        if (className.includes('group')) return true;
+        const cells = Array.from(row.querySelectorAll('td'));
+        const texts = cells.map((cell) => metricCellText(cell)).filter(Boolean);
+        const lead = texts.slice(0, 3).join(' ').trim().toLowerCase();
+        if (/^(node|namespace)\s*[:\uff1a]/.test(lead)) return true;
+        if (/^(\u8282\u70b9|\u547d\u540d\u7a7a\u95f4)\s*[:\uff1a]/.test(lead)) return true;
+        if (texts.length <= 2 && cells.length > 1 && lead) return true;
+        return false;
+    }
+
+    function isPodDataRow(row) {
+        if (!row || isPodGroupRow(row)) return false;
+        const cells = row.querySelectorAll('td');
+        if (cells.length < 4) return false;
+        const text = metricCellText(row).toLowerCase();
+        return /(running|pending|succeeded|failed|unknown|completed|crashloopbackoff|imagepullbackoff|containercreating|terminating|evicted)/.test(text)
+            || /(\u8fd0\u884c\u4e2d|\u5931\u8d25|\u672a\u77e5|\u5df2\u5b8c\u6210|\u6b63\u5728\u7ec8\u6b62)/.test(text)
+            || !!extractPodRefFromRow(row);
+    }
+
+    function metricCellText(cell) {
+        return (cell && cell.textContent ? cell.textContent : '').trim();
+    }
+
+    function looksLikePodIP(text) {
+        return /^\d{1,3}(?:\.\d{1,3}){3}$/.test((text || '').trim());
+    }
+
+    function looksLikeAgeText(text) {
+        const value = (text || '').trim().toLowerCase();
+        return /^\d+\s*([a-z]+|[\u4e00-\u9fff]+)/.test(value);
+    }
+
+    function isShiftedMetricCell(cell) {
+        const text = metricCellText(cell);
+        return !!text && !cell.querySelector('.metrics-progress-container') && (looksLikePodIP(text) || looksLikeAgeText(text));
+    }
+
+    function insertMetricCellAt(row, index, key) {
+        const td = document.createElement('td');
+        td.className = 'text-left';
+        td.dataset.columnKey = key;
+        td.style.padding = '8px';
+        td.style.verticalAlign = 'middle';
+        setImportantWidth(td, colWidthByKey(key));
+        const cells = Array.from(row.querySelectorAll('td'));
+        const ref = cells[index] || null;
+        row.insertBefore(td, ref);
+        return td;
+    }
+
+    function setImportantWidth(el, width) {
+        if (!el || !width) return;
+        el.style.setProperty('width', width, 'important');
+        el.style.setProperty('min-width', width, 'important');
+        el.style.setProperty('max-width', width, 'important');
+    }
+
+    function ensurePodMetricCells(row, cpuIndex, memoryIndex) {
+        if (!isPodDataRow(row)) return;
+
+        const ensureMetricCell = (index, key) => {
+            if (index < 0) return;
+
+            const existing = row.querySelector(`td[data-column-key="${key}"]`);
+            if (existing) {
+                if (isShiftedMetricCell(existing)) {
+                    delete existing.dataset.columnKey;
+                } else {
+                    return;
+                }
+            }
+
+            const cells = Array.from(row.querySelectorAll('td'));
+            const candidate = cells[index];
+            if (candidate && !isShiftedMetricCell(candidate)) {
+                candidate.dataset.columnKey = key;
+                setImportantWidth(candidate, colWidthByKey(key));
+                return;
+            }
+
+            insertMetricCellAt(row, index, key);
+        };
+
+        ensureMetricCell(cpuIndex, 'cpuUsage');
+        ensureMetricCell(memoryIndex, 'memoryUsage');
     }
 
     function closeAllNodePodMenus() {
@@ -1069,15 +1190,15 @@
     function isNodeTable(table) {
         const headerTexts = getTableHeaderTexts(table);
         if (!headerTexts.length) return false;
-        const hasName = hasAnyHeader(headerTexts, ['name', '名称']);
-        const hasOS = hasAnyHeader(headerTexts, ['os', '操作系统']);
+        const hasName = hasAnyHeader(headerTexts, ['name', '\u540d\u79f0']);
+        const hasOS = hasAnyHeader(headerTexts, ['os', '鎿嶄綔绯荤粺']);
         const hasCPU = hasAnyHeader(headerTexts, ['cpu']);
         const hasNameZh = hasAnyHeader(headerTexts, ['\u540d\u79f0']);
         const hasOSZh = hasAnyHeader(headerTexts, ['\u64cd\u4f5c\u7cfb\u7edf']);
         const hasRAMZh = hasAnyHeader(headerTexts, ['\u5185\u5b58', '\u5185\u5b58ram']);
         const hasPodsZh = hasAnyHeader(headerTexts, ['pod\u6570', 'pod\u6570\u91cf']);
-        const hasRAM = hasAnyHeader(headerTexts, ['ram', 'memory', '内存']);
-        const hasPods = hasAnyHeader(headerTexts, ['pods', 'pod', 'pods数', 'pod数量']);
+        const hasRAM = hasAnyHeader(headerTexts, ['ram', 'memory', '\u5185\u5b58']);
+        const hasPods = hasAnyHeader(headerTexts, ['pods', 'pod', 'pods\u6570', 'pod\u6570\u91cf']);
         if ((hasName || hasNameZh) && (hasOS || hasOSZh) && hasCPU && (hasRAM || hasRAMZh) && (hasPods || hasPodsZh)) return true;
         const nodeLinks = table.querySelectorAll('tbody a[href*="/node/"]');
         return nodeLinks.length > 0;
@@ -1112,34 +1233,25 @@
             const all = headers();
             return all.findIndex((th) => {
                 const text = normalizeHeaderText(th.textContent);
-                return text.startsWith('ram') || text.startsWith('memory') || text.includes('内存');
+                return text.startsWith('ram') || text.startsWith('memory') || text.includes('\u5185\u5b58');
             });
         };
         const insertHeaderAt = (index, label, key) => {
             const th = document.createElement('th');
             th.textContent = label;
             th.dataset.columnKey = key;
-            th.style.width = colWidthByKey(key);
+            setImportantWidth(th, colWidthByKey(key));
             th.style.fontWeight = 'normal';
             const all = headers();
             const ref = all[index] || null;
             headerRow.insertBefore(th, ref);
-        };
-        const insertCellAt = (row, index, key) => {
-            const td = document.createElement('td');
-            td.className = 'text-left';
-            td.dataset.columnKey = key;
-            td.style.padding = '8px';
-            td.style.verticalAlign = 'middle';
-            const tds = Array.from(row.querySelectorAll('td'));
-            const ref = tds[index] || null;
-            row.insertBefore(td, ref);
         };
         const moveColumn = (fromIndex, toIndex) => {
             if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
             const rows = table.querySelectorAll('tr');
             rows.forEach((row) => {
                 if (row.querySelector('td[colspan]')) return;
+                if (row.closest('tbody') && isPodGroupRow(row)) return;
                 const cells = Array.from(row.children).filter((n) => n.tagName === 'TH' || n.tagName === 'TD');
                 if (fromIndex >= cells.length || toIndex >= cells.length) return;
                 const cell = cells[fromIndex];
@@ -1149,17 +1261,7 @@
                 row.insertBefore(cell, ref);
             });
         };
-        const isGroupRow = (row) => {
-            if (row.querySelector('td[colspan]')) return true;
-            return row.className && row.className.toLowerCase().includes('group');
-        };
-        const isPodDataRow = (row) => {
-            if (isGroupRow(row)) return false;
-            // Pod rows always have a clickable name link.
-            return !!row.querySelector('a');
-        };
-
-        const restartIndex = findHeaderIndex(['Restarts', '重启', '重启次数']);
+        const restartIndex = findHeaderIndex(['Restarts', '\u91cd\u542f', '\u91cd\u542f\u6b21\u6570']);
         let cpuIndex = findHeaderIndex(['CPU']);
         let memoryIndex = findMemoryHeaderIndex();
         if (cpuIndex < 0 && restartIndex >= 0) {
@@ -1187,11 +1289,11 @@
             }
         }
 
-        const tbody = table.querySelector('tbody');
-        if (tbody) {
-            const rows = tbody.querySelectorAll('tr');
-            rows.forEach(row => {
-                if (isGroupRow(row)) {
+        const bodies = getTableBodies(table);
+        if (bodies.length) {
+            bodies.forEach((tbody) => tbody.querySelectorAll('tr').forEach(row => {
+                if (isPodGroupRow(row)) {
+                    row.querySelectorAll('td[data-column-key="cpuUsage"], td[data-column-key="memoryUsage"]').forEach((cell) => cell.remove());
                     const groupCell = row.querySelector('td[colspan]');
                     if (groupCell) {
                         groupCell.setAttribute('colspan', String(headers().length));
@@ -1200,41 +1302,32 @@
                 }
                 if (!isPodDataRow(row)) return;
 
-                const expectedCols = headers().length;
-                let rowCells = Array.from(row.querySelectorAll('td'));
-                if (rowCells.length < expectedCols) {
-                    // Ensure metric columns exist before we bind values; this prevents
-                    // shifting/overwriting existing IP/Node cells when metrics render later.
-                    if (!row.querySelector('td[data-column-key="cpuUsage"]')) {
-                        insertCellAt(row, cpuIndex, 'cpuUsage');
-                    }
-                    if (!row.querySelector('td[data-column-key="memoryUsage"]')) {
-                        insertCellAt(row, memoryIndex, 'memoryUsage');
-                    }
-                    rowCells = Array.from(row.querySelectorAll('td'));
-                }
+                ensurePodMetricCells(row, cpuIndex, memoryIndex);
+                const rowCells = Array.from(row.querySelectorAll('td'));
 
                 CONFIG.columns.forEach(col => {
                     const targetIndex = col.key === 'cpuUsage' ? cpuIndex : memoryIndex;
                     if (targetIndex < 0) return;
                     if (rowCells[targetIndex]) {
                         rowCells[targetIndex].dataset.columnKey = col.key;
-                    } else {
-                        // Only insert when the row is still structurally shorter than header.
-                        if (rowCells.length < expectedCols) {
-                            insertCellAt(row, targetIndex, col.key);
-                        }
+                        setImportantWidth(rowCells[targetIndex], colWidthByKey(col.key));
                     }
                 });
-            });
+            }));
         }
 
     }
 
     function colWidthByKey(key) {
-        if (key === 'cpuUsage' || key === 'memoryUsage') return '100px';
+        if (key === 'cpuUsage' || key === 'memoryUsage') return '150px';
         if (key === 'age') return '72px';
         return '';
+    }
+
+    function setColumnWidth(table, idx, width) {
+        if (!table || idx < 0 || !width) return;
+        const col = table.querySelector(`colgroup col:nth-child(${idx + 1})`);
+        if (col) setImportantWidth(col, width);
     }
 
     function applyPodColumnLayout(table) {
@@ -1244,38 +1337,41 @@
         const headers = Array.from(headerRow.querySelectorAll('th'));
         const findIdx = (pred) => headers.findIndex((th) => pred(normalizeHeaderText(th.textContent)));
         const cpuIdx = findIdx((t) => t.startsWith('cpu'));
-        const ramIdx = findIdx((t) => t.startsWith('ram') || t.startsWith('memory') || t.includes('内存'));
-        const ageIdx = findIdx((t) => t.startsWith('age') || t === '年龄');
+        const ramIdx = findIdx((t) => t.startsWith('ram') || t.startsWith('memory') || t.includes('\u5185\u5b58'));
+        const ageIdx = findIdx((t) => t.startsWith('age') || t === '\u5e74\u9f84' || t === '\u5b58\u6d3b\u65f6\u95f4');
         const layoutSig = `${cpuIdx}|${ramIdx}|${ageIdx}|${colWidthByKey('cpuUsage')}|${colWidthByKey('memoryUsage')}|${colWidthByKey('age')}`;
         const lastSig = table.dataset.podLayoutSig || '';
 
         const setHeaderWidth = (idx, w) => {
             if (idx < 0 || !w) return;
-            headers[idx].style.width = w;
-            headers[idx].style.minWidth = w;
+            setImportantWidth(headers[idx], w);
+            setColumnWidth(table, idx, w);
         };
+
+        setHeaderWidth(cpuIdx, colWidthByKey('cpuUsage'));
+        setHeaderWidth(ramIdx, colWidthByKey('memoryUsage'));
+        setHeaderWidth(ageIdx, colWidthByKey('age'));
         if (lastSig !== layoutSig) {
-            setHeaderWidth(cpuIdx, colWidthByKey('cpuUsage'));
-            setHeaderWidth(ramIdx, colWidthByKey('memoryUsage'));
-            setHeaderWidth(ageIdx, colWidthByKey('age'));
             table.dataset.podLayoutSig = layoutSig;
         }
 
-        const tbody = table.querySelector('tbody');
-        if (!tbody) return;
-        const rows = Array.from(tbody.querySelectorAll('tr'));
-        rows.forEach((row) => {
-            if (row.dataset.podLayoutSigApplied === layoutSig) return;
-            const cells = row.querySelectorAll('td');
-            const setCellWidth = (idx, w) => {
-                if (idx < 0 || !w || !cells[idx]) return;
-                cells[idx].style.width = w;
-                cells[idx].style.minWidth = w;
-            };
-            setCellWidth(cpuIdx, colWidthByKey('cpuUsage'));
-            setCellWidth(ramIdx, colWidthByKey('memoryUsage'));
-            setCellWidth(ageIdx, colWidthByKey('age'));
-            row.dataset.podLayoutSigApplied = layoutSig;
+        const bodies = getTableBodies(table);
+        if (!bodies.length) return;
+        bodies.forEach((tbody) => {
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+            rows.forEach((row) => {
+                if (!isPodDataRow(row)) return;
+                if (row.dataset.podLayoutSigApplied === layoutSig) return;
+                const cells = row.querySelectorAll('td');
+                const setCellWidth = (idx, w) => {
+                    if (idx < 0 || !w || !cells[idx]) return;
+                    setImportantWidth(cells[idx], w);
+                };
+                setCellWidth(cpuIdx, colWidthByKey('cpuUsage'));
+                setCellWidth(ramIdx, colWidthByKey('memoryUsage'));
+                setCellWidth(ageIdx, colWidthByKey('age'));
+                row.dataset.podLayoutSigApplied = layoutSig;
+            });
         });
     }
 
@@ -1288,20 +1384,26 @@
         headers.forEach((th, index) => {
             const text = normalizeHeaderText(th.textContent);
             if (!text) return;
-            if ((text.startsWith('restarts') || text.includes('重启')) && typeof result.restarts !== 'number') result.restarts = index;
+            if ((text.startsWith('restarts') || text.includes('\u91cd\u542f')) && typeof result.restarts !== 'number') result.restarts = index;
             if (text.startsWith('cpu') && typeof result.cpu !== 'number') result.cpu = index;
-            if ((text.startsWith('memory') || text.startsWith('ram') || text.includes('内存')) && typeof result.memory !== 'number') result.memory = index;
+            if ((text.startsWith('memory') || text.startsWith('ram') || text.includes('\u5185\u5b58')) && typeof result.memory !== 'number') result.memory = index;
         });
         return result;
     }
 
     function resolveMetricCell(row, key, colIndex) {
+        if (!isPodDataRow(row)) return null;
+
         let cell = row.querySelector(`td[data-column-key="${key}"]`);
+        if (cell && isShiftedMetricCell(cell)) {
+            delete cell.dataset.columnKey;
+            cell = null;
+        }
         if (cell) return cell;
 
         if (typeof colIndex === 'number' && colIndex >= 0) {
             const cells = Array.from(row.querySelectorAll('td'));
-            if (cells[colIndex]) {
+            if (cells[colIndex] && !isShiftedMetricCell(cells[colIndex])) {
                 cell = cells[colIndex];
                 cell.dataset.columnKey = key;
                 return cell;
@@ -1309,16 +1411,7 @@
 
             // In grouped mode, some rows can be rendered without CPU/MEM cells
             // after the first group. Patch missing cells in place to keep column alignment.
-            if (cells.length > 0 && !row.querySelector('td[colspan]')) {
-                const td = document.createElement('td');
-                td.className = 'text-left';
-                td.dataset.columnKey = key;
-                td.style.padding = '8px';
-                td.style.verticalAlign = 'middle';
-                const ref = cells[colIndex] || null;
-                row.insertBefore(td, ref);
-                return td;
-            }
+            if (cells.length > 0) return insertMetricCellAt(row, colIndex, key);
         }
 
         return null;
@@ -1461,6 +1554,45 @@
         return Array.from(keys);
     }
 
+    function normalizePodNameForMatch(value) {
+        return normalizeKey(value).replace(/\s+/g, '');
+    }
+
+    function extractPodRowNames(row) {
+        const names = new Set();
+        const addName = (value) => {
+            const normalized = normalizePodNameForMatch(value);
+            if (normalized) names.add(normalized);
+        };
+
+        const ref = extractPodRefFromRow(row);
+        if (ref && ref.name) addName(ref.name);
+
+        row.querySelectorAll('a[href]').forEach((link) => {
+            addName(link.textContent);
+            const href = link.getAttribute('href') || '';
+            const match = href.match(/\/pod\/([^\/?#]+)\/([^\/?#]+)/i);
+            if (match) addName(decodeURIComponent(match[2]));
+        });
+
+        const cells = row.querySelectorAll('td');
+        if (cells[1]) addName(cells[1].textContent);
+
+        return Array.from(names);
+    }
+
+    function extractUnreadyStatusPodName(row) {
+        const text = metricCellText(row);
+        if (!/containers with unready status/i.test(text)) return '';
+        const match = text.match(/\[([^\]]+)\]/);
+        return match ? normalizePodNameForMatch(match[1]) : '';
+    }
+
+    function podNameMatchesAlert(podName, alertName) {
+        if (!podName || !alertName) return false;
+        return podName === alertName || podName.startsWith(`${alertName}-`);
+    }
+
     async function fetchJSON(candidates, endpointName) {
         let lastError = null;
         for (const url of candidates) {
@@ -1491,8 +1623,57 @@
         throw lastError || new Error(`no ${endpointName} endpoint available`);
     }
 
+    function normalizeCollectionURL(url) {
+        if (!url) return '';
+        try {
+            const parsed = new URL(url, window.location.origin);
+            return parsed.pathname + parsed.search;
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function nextCollectionURL(data) {
+        if (!data) return '';
+        const pagination = data.pagination || {};
+        if (pagination.next) return normalizeCollectionURL(pagination.next);
+
+        const next = data.links && data.links.next;
+        if (next) return normalizeCollectionURL(next);
+
+        const cont = data.continue || (data.metadata && data.metadata.continue);
+        if (!cont || !data.links || !data.links.self) return '';
+
+        const parsed = new URL(normalizeCollectionURL(data.links.self), window.location.origin);
+        parsed.searchParams.set('continue', cont);
+        return parsed.pathname + parsed.search;
+    }
+
+    async function fetchCollectionJSON(candidates, endpointName) {
+        const first = await fetchJSON(candidates, endpointName);
+        const merged = Object.assign({}, first, { data: Array.isArray(first.data) ? first.data.slice() : [] });
+        const seen = new Set(candidates.map((url) => normalizeCollectionURL(url)).filter(Boolean));
+        let next = nextCollectionURL(first);
+
+        while (next && !seen.has(next)) {
+            seen.add(next);
+            const page = await fetchJSON([next], endpointName);
+            if (Array.isArray(page.data)) {
+                merged.data = merged.data.concat(page.data);
+            }
+            next = nextCollectionURL(page);
+        }
+
+        delete merged.continue;
+        if (merged.pagination) {
+            merged.pagination = Object.assign({}, merged.pagination, { partial: false });
+            delete merged.pagination.next;
+        }
+        return merged;
+    }
+
     async function fetchPodsJSON() {
-        return fetchJSON([
+        return fetchCollectionJSON([
             '/v1/pods?exclude=metadata.managedFields',
         ], 'pods');
     }
@@ -1504,7 +1685,7 @@
     }
 
     async function fetchPodMetricsJSON() {
-        return fetchJSON([
+        return fetchCollectionJSON([
             '/v1/metrics.k8s.io.pods?exclude=metadata.managedFields',
         ], 'pod metrics');
     }
@@ -1813,15 +1994,51 @@
     }
 
     function sortRowsByMetric(table, key, asc, metrics) {
-        const tbody = table.querySelector('tbody');
-        if (!tbody) return;
-        const rows = Array.from(tbody.querySelectorAll('tr'));
-        rows.sort((a, b) => {
-            const av = getRowMetricValue(a, key, metrics);
-            const bv = getRowMetricValue(b, key, metrics);
-            return asc ? av - bv : bv - av;
+        const bodies = getTableBodies(table);
+        if (!bodies.length) return;
+        bodies.forEach((tbody) => {
+            const rows = Array.from(tbody.children).filter((el) => el.tagName === 'TR');
+            const groupRows = rows.filter((row) => isPodGroupRow(row));
+            const sortableRows = rows.filter((row) => !isPodGroupRow(row));
+            const blocks = [];
+            const unmatchedRows = [];
+
+            sortableRows.forEach((row) => {
+                if (isPodDataRow(row)) {
+                    blocks.push({ row, names: extractPodRowNames(row), extra: [] });
+                }
+            });
+
+            sortableRows.forEach((row) => {
+                if (isPodDataRow(row)) return;
+
+                const alertName = extractUnreadyStatusPodName(row);
+                const matched = alertName
+                    ? blocks.find((block) => block.names.some((name) => podNameMatchesAlert(name, alertName)))
+                    : null;
+
+                if (matched) {
+                    matched.extra.push(row);
+                } else if (blocks.length) {
+                    blocks[blocks.length - 1].extra.push(row);
+                } else {
+                    unmatchedRows.push(row);
+                }
+            });
+
+            blocks.sort((a, b) => {
+                const av = getRowMetricValue(a.row, key, metrics);
+                const bv = getRowMetricValue(b.row, key, metrics);
+                return asc ? av - bv : bv - av;
+            });
+
+            groupRows.forEach((row) => tbody.appendChild(row));
+            blocks.forEach((block) => {
+                tbody.appendChild(block.row);
+                block.extra.forEach((row) => tbody.appendChild(row));
+            });
+            unmatchedRows.forEach((row) => tbody.appendChild(row));
         });
-        rows.forEach((row) => tbody.appendChild(row));
     }
 
     function ensureSortIcon(th) {
@@ -1884,9 +2101,60 @@
         downIcons.forEach((el) => el.classList.add('faded'));
     }
 
+    function metricSortKeyFromHeader(th) {
+        if (!th) return '';
+        const text = normalizeHeaderText(th.textContent);
+        if (text.startsWith('cpu')) return 'cpuUsage';
+        if (text.startsWith('memory') || text.startsWith('ram') || text.includes('\u5185\u5b58')) return 'memoryUsage';
+        return '';
+    }
+
+    function handleMetricHeaderSortClick(event) {
+        const target = event.target && event.target.nodeType === 1 ? event.target : (event.target && event.target.parentElement);
+        const th = target && target.closest ? target.closest('th') : null;
+        const key = metricSortKeyFromHeader(th);
+        if (!key) return;
+
+        const table = th.closest('table');
+        if (!table || !isPodTable(table)) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+
+        if (sortState.key === key) {
+            sortState.asc = !sortState.asc;
+        } else {
+            sortState.key = key;
+            sortState.asc = false;
+        }
+
+        applyMetricSort(table);
+        setTimeout(() => applyMetricSort(table), 0);
+        setTimeout(() => applyMetricSort(table), 120);
+    }
+
+    function applyMetricSort(table) {
+        if (!table || !sortState.key) return;
+        addCustomColumns(table);
+        applyPodColumnLayout(table);
+        if (metricsCache || podResourcesCache) {
+            updateTableWithMetrics(table, { metrics: metricsCache, resources: podResourcesCache });
+        }
+        sortRowsByMetric(table, sortState.key, sortState.asc, metricsCache);
+        enableMetricSorting(table);
+    }
+
+    function bindMetricHeaderSortHandler() {
+        if (metricHeaderSortBound) return;
+        document.addEventListener('click', handleMetricHeaderSortClick, true);
+        metricHeaderSortBound = true;
+    }
+
     function enableMetricSorting(table) {
         const headerRow = table.querySelector('thead tr');
         if (!headerRow) return;
+        bindMetricHeaderSortHandler();
 
         const headers = Array.from(headerRow.querySelectorAll('th'));
         if (sortState.key) {
@@ -1895,29 +2163,16 @@
             resetAllSortIcons(headerRow);
         }
         headers.forEach((th) => {
-            const text = normalizeHeaderText(th.textContent);
-            const key = text.startsWith('cpu')
-                ? 'cpuUsage'
-                : ((text.startsWith('memory') || text.startsWith('ram') || text.includes('内存')) ? 'memoryUsage' : '');
+            const key = metricSortKeyFromHeader(th);
             if (!key) return;
 
+            th.dataset.columnKey = key;
+            setImportantWidth(th, colWidthByKey(key));
+            setColumnWidth(table, headers.indexOf(th), colWidthByKey(key));
             th.classList.add('metrics-sortable');
             // Ensure metric columns always have native sort widget and default
             // inactive style before applying current metric sort state.
             ensureSortIcon(th);
-            if (!th.dataset.sortBound) {
-                th.addEventListener('click', () => {
-                    if (sortState.key === key) {
-                        sortState.asc = !sortState.asc;
-                    } else {
-                        sortState.key = key;
-                        sortState.asc = false;
-                    }
-                    sortRowsByMetric(table, sortState.key, sortState.asc, metricsCache);
-                    enableMetricSorting(table);
-                });
-                th.dataset.sortBound = '1';
-            }
             applySortVisual(th, key);
         });
     }
@@ -1929,42 +2184,17 @@
         const headerIndexes = getHeaderIndexes(table);
         const cpuIndex = typeof headerIndexes.cpu === 'number' ? headerIndexes.cpu : -1;
         const memoryIndex = typeof headerIndexes.memory === 'number' ? headerIndexes.memory : -1;
-        const expectedCols = table.querySelectorAll('thead tr th').length;
 
-        const tbody = table.querySelector('tbody');
-        if (!tbody) return;
+        const bodies = getTableBodies(table);
+        if (!bodies.length) return;
 
-        const rows = tbody.querySelectorAll('tr');
-        rows.forEach(row => {
-            const singleCol = row.querySelector('td[colspan]');
-            if (singleCol) return;
-
-            // Normalize row column count before mapping indexes; this prevents
-            // IP/Node cells from being mistaken as CPU/MEM after grouped mode toggles.
-            const existingMetricCPU = row.querySelector('td[data-column-key="cpuUsage"]');
-            const existingMetricMem = row.querySelector('td[data-column-key="memoryUsage"]');
-            let rowCells = Array.from(row.querySelectorAll('td'));
-            if (rowCells.length < expectedCols) {
-                if (!existingMetricCPU && cpuIndex >= 0) {
-                    const td = document.createElement('td');
-                    td.className = 'text-left';
-                    td.dataset.columnKey = 'cpuUsage';
-                    td.style.padding = '8px';
-                    td.style.verticalAlign = 'middle';
-                    const ref = rowCells[cpuIndex] || null;
-                    row.insertBefore(td, ref);
-                }
-                rowCells = Array.from(row.querySelectorAll('td'));
-                if (!existingMetricMem && memoryIndex >= 0) {
-                    const td = document.createElement('td');
-                    td.className = 'text-left';
-                    td.dataset.columnKey = 'memoryUsage';
-                    td.style.padding = '8px';
-                    td.style.verticalAlign = 'middle';
-                    const ref = rowCells[memoryIndex] || null;
-                    row.insertBefore(td, ref);
-                }
+        bodies.forEach((tbody) => tbody.querySelectorAll('tr').forEach(row => {
+            if (isPodGroupRow(row)) {
+                row.querySelectorAll('td[data-column-key="cpuUsage"], td[data-column-key="memoryUsage"]').forEach((cell) => cell.remove());
+                return;
             }
+            if (!isPodDataRow(row)) return;
+            ensurePodMetricCells(row, cpuIndex, memoryIndex);
 
             const rowKeys = extractRowPodKeys(row);
             if (rowKeys.length === 0) return;
@@ -1998,7 +2228,7 @@
                     renderMetricCell(cell, memoryUsage, memoryRequest, memoryLimit, 'Mi');
                 }
             });
-        });
+        }));
     }
 
     function getNodeHeaderIndexes(table) {
@@ -2010,11 +2240,11 @@
         headers.forEach((th, index) => {
             const text = normalizeHeaderText(th.textContent);
             if (!text) return;
-            if ((text === 'name' || text === '名称') && typeof result.name !== 'number') result.name = index;
-            if ((text.startsWith('version') || text.includes('版本')) && typeof result.version !== 'number') result.version = index;
-            if ((text.startsWith('externalinternalip') || text.includes('内部ip') || text.includes('externalinternalip')) && typeof result.ip !== 'number') result.ip = index;
+            if ((text === 'name' || text === '\u540d\u79f0') && typeof result.name !== 'number') result.name = index;
+            if ((text.startsWith('version') || text.includes('鐗堟湰')) && typeof result.version !== 'number') result.version = index;
+            if ((text.startsWith('externalinternalip') || text.includes('\u5185\u90e8ip') || text.includes('externalinternalip')) && typeof result.ip !== 'number') result.ip = index;
             if (text.startsWith('cpu') && typeof result.cpu !== 'number') result.cpu = index;
-            if ((text.startsWith('ram') || text.startsWith('memory') || text.includes('内存')) && typeof result.ram !== 'number') result.ram = index;
+            if ((text.startsWith('ram') || text.startsWith('memory') || text.includes('\u5185\u5b58')) && typeof result.ram !== 'number') result.ram = index;
         });
         return result;
     }
@@ -2265,6 +2495,10 @@
             applyPodColumnLayout(table);
             if (data) {
                 updateTableWithMetrics(table, data);
+                if (!sortState.key && !isGroupedPodTable(table)) {
+                    sortState.key = 'memoryUsage';
+                    sortState.asc = false;
+                }
                 if (sortState.key) {
                     sortRowsByMetric(table, sortState.key, sortState.asc, data.metrics);
                 }

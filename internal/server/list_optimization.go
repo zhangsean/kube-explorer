@@ -31,6 +31,9 @@ type cachedListResponse struct {
 
 func optimizeListRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		if shouldLoadAllPods(req) {
+			loadAllPods(req)
+		}
 		if shouldClampReplicaSetList(req) {
 			clampReplicaSetList(req)
 		}
@@ -59,6 +62,22 @@ func optimizeListRequests(next http.Handler) http.Handler {
 			})
 		}
 	})
+}
+
+func shouldLoadAllPods(req *http.Request) bool {
+	return req.Method == http.MethodGet &&
+		req.URL != nil &&
+		req.URL.Path == "/v1/pods" &&
+		req.URL.Query().Get("continue") == ""
+}
+
+func loadAllPods(req *http.Request) {
+	query := req.URL.Query()
+	if query.Get("limit") == "" {
+		return
+	}
+	query.Del("limit")
+	req.URL.RawQuery = query.Encode()
 }
 
 func shouldClampReplicaSetList(req *http.Request) bool {
