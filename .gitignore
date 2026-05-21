@@ -19,6 +19,7 @@
 /dist
 /build
 *.swp
+kube-explorer-linux-*
 
 /.vscode
 /vendor
