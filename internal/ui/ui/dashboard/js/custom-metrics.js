@@ -16,12 +16,14 @@
     let nodeResourceSummaryCache = {};
     let lastFetchTime = 0;
     let lastNodeFetchTime = 0;
-    const CACHE_DURATION = 30000;
-    const REFRESH_INTERVAL = 30000;
+    const CACHE_DURATION = 10000;
+    const REFRESH_INTERVAL = 10000;
     const ENABLE_NODE_POD_ENHANCEMENTS = true;
     const MIN_PROCESS_GAP = 700;
     let processTimer = null;
     let metricHeaderSortBound = false;
+    let nativeSortActive = false;
+    let lastNativeSortAt = 0;
     let isProcessing = false;
     let pendingProcess = false;
     let lastProcessStartedAt = 0;
@@ -221,16 +223,48 @@
                 top: 0;
             }
 
-            .metrics-sortable .sort .icon-stack {
-                display: inline-flex;
-                align-items: center;
-                height: 14px;
+            .metrics-sortable > .sort.metrics-sort-indicator {
+                width: 16px;
+                height: 16px;
+                flex-direction: column;
+                justify-content: center;
+                gap: 0;
+                overflow: visible;
             }
 
             .metrics-sortable .sort .faded {
                 opacity: 0.3 !important;
             }
 
+            th.metrics-native-sort-reset .sort .icon,
+            th.metrics-native-sort-reset .sort i {
+                opacity: 0.3 !important;
+            }
+
+            .metrics-sortable > .sort.metrics-sort-indicator .metrics-sort-up,
+            .metrics-sortable > .sort.metrics-sort-indicator .metrics-sort-down {
+                display: block !important;
+                width: 16px;
+                height: 6px;
+                min-width: 16px;
+                line-height: 6px;
+                font-size: 14px;
+                text-align: center;
+                opacity: 0.3 !important;
+            }
+
+            .metrics-sortable > .sort.metrics-sort-indicator .metrics-sort-up {
+                transform: translateY(4px);
+            }
+
+            .metrics-sortable > .sort.metrics-sort-indicator .metrics-sort-down {
+                transform: translateY(-4px);
+            }
+
+            .metrics-sortable > .sort.metrics-sort-indicator[data-metric-sort-dir="asc"] .metrics-sort-up,
+            .metrics-sortable > .sort.metrics-sort-indicator[data-metric-sort-dir="desc"] .metrics-sort-down {
+                opacity: 1 !important;
+            }
 
             .node-req-lim-summary {
                 margin-top: 6px;
@@ -1319,8 +1353,13 @@
     }
 
     function colWidthByKey(key) {
+        if (key === 'name') return '220px';
+        if (key === 'namespace') return '90px';
+        if (key === 'ready') return '72px';
+        if (key === 'restarts') return '96px';
+        if (key === 'node' || key === 'ip') return '100px';
         if (key === 'cpuUsage' || key === 'memoryUsage') return '150px';
-        if (key === 'age') return '72px';
+        if (key === 'age') return '96px';
         return '';
     }
 
@@ -1336,20 +1375,35 @@
         if (!headerRow) return;
         const headers = Array.from(headerRow.querySelectorAll('th'));
         const findIdx = (pred) => headers.findIndex((th) => pred(normalizeHeaderText(th.textContent)));
+        const nameIdx = findIdx((t) => t.startsWith('name') || t.includes('\u540d\u79f0'));
+        const namespaceIdx = findIdx((t) => t.startsWith('namespace') || t.includes('\u547d\u540d\u7a7a\u95f4'));
+        const readyIdx = findIdx((t) => t.startsWith('ready') || t.includes('\u5c31\u7eea'));
+        const restartsIdx = findIdx((t) => t.startsWith('restarts') || t.includes('\u91cd\u542f'));
+        const nodeIdx = findIdx((t) => t.startsWith('node') || t.includes('\u8282\u70b9'));
+        const ipIdx = findIdx((t) => t === 'ip' || t === 'podip' || t.includes('\u5185\u90e8ip'));
         const cpuIdx = findIdx((t) => t.startsWith('cpu'));
         const ramIdx = findIdx((t) => t.startsWith('ram') || t.startsWith('memory') || t.includes('\u5185\u5b58'));
+        const imageIdx = findIdx((t) => t.startsWith('image') || t.includes('\u955c\u50cf'));
         const ageIdx = findIdx((t) => t.startsWith('age') || t === '\u5e74\u9f84' || t === '\u5b58\u6d3b\u65f6\u95f4');
-        const layoutSig = `${cpuIdx}|${ramIdx}|${ageIdx}|${colWidthByKey('cpuUsage')}|${colWidthByKey('memoryUsage')}|${colWidthByKey('age')}`;
+        const layoutSig = `${nameIdx}|${namespaceIdx}|${readyIdx}|${restartsIdx}|${nodeIdx}|${ipIdx}|${cpuIdx}|${ramIdx}|${imageIdx}|${ageIdx}|${colWidthByKey('name')}|${colWidthByKey('namespace')}|${colWidthByKey('ready')}|${colWidthByKey('restarts')}|${colWidthByKey('node')}|${colWidthByKey('ip')}|${colWidthByKey('cpuUsage')}|${colWidthByKey('memoryUsage')}|${colWidthByKey('image')}|${colWidthByKey('age')}`;
         const lastSig = table.dataset.podLayoutSig || '';
 
         const setHeaderWidth = (idx, w) => {
             if (idx < 0 || !w) return;
             setImportantWidth(headers[idx], w);
+            headers[idx].style.setProperty('white-space', 'nowrap', 'important');
             setColumnWidth(table, idx, w);
         };
 
+        setHeaderWidth(nameIdx, colWidthByKey('name'));
+        setHeaderWidth(namespaceIdx, colWidthByKey('namespace'));
+        setHeaderWidth(readyIdx, colWidthByKey('ready'));
+        setHeaderWidth(restartsIdx, colWidthByKey('restarts'));
+        setHeaderWidth(nodeIdx, colWidthByKey('node'));
+        setHeaderWidth(ipIdx, colWidthByKey('ip'));
         setHeaderWidth(cpuIdx, colWidthByKey('cpuUsage'));
         setHeaderWidth(ramIdx, colWidthByKey('memoryUsage'));
+        setHeaderWidth(imageIdx, colWidthByKey('image'));
         setHeaderWidth(ageIdx, colWidthByKey('age'));
         if (lastSig !== layoutSig) {
             table.dataset.podLayoutSig = layoutSig;
@@ -1366,9 +1420,27 @@
                 const setCellWidth = (idx, w) => {
                     if (idx < 0 || !w || !cells[idx]) return;
                     setImportantWidth(cells[idx], w);
+                    cells[idx].style.setProperty('white-space', 'nowrap', 'important');
                 };
+                setCellWidth(nameIdx, colWidthByKey('name'));
+                setCellWidth(namespaceIdx, colWidthByKey('namespace'));
+                setCellWidth(readyIdx, colWidthByKey('ready'));
+                setCellWidth(restartsIdx, colWidthByKey('restarts'));
+                setCellWidth(nodeIdx, colWidthByKey('node'));
+                setCellWidth(ipIdx, colWidthByKey('ip'));
                 setCellWidth(cpuIdx, colWidthByKey('cpuUsage'));
                 setCellWidth(ramIdx, colWidthByKey('memoryUsage'));
+                setCellWidth(imageIdx, colWidthByKey('image'));
+                if (nameIdx >= 0 && cells[nameIdx]) {
+                    cells[nameIdx].style.setProperty('white-space', 'normal', 'important');
+                    cells[nameIdx].style.setProperty('overflow-wrap', 'anywhere', 'important');
+                    cells[nameIdx].style.setProperty('word-break', 'break-word', 'important');
+                }
+                if (imageIdx >= 0 && cells[imageIdx]) {
+                    cells[imageIdx].style.setProperty('white-space', 'normal', 'important');
+                    cells[imageIdx].style.setProperty('overflow-wrap', 'anywhere', 'important');
+                    cells[imageIdx].style.setProperty('word-break', 'break-word', 'important');
+                }
                 setCellWidth(ageIdx, colWidthByKey('age'));
                 row.dataset.podLayoutSigApplied = layoutSig;
             });
@@ -2042,63 +2114,158 @@
     }
 
     function ensureSortIcon(th) {
+        normalizeMetricSortRoots(th);
         let sortRoot = th.querySelector('.sort.metrics-sort-indicator');
         if (sortRoot) {
+            sortRoot.dataset.metricsSortRoot = '1';
             return {
                 root: sortRoot,
-                up: sortRoot.querySelector('.icon-sort'),
-                down: sortRoot.querySelector('.icon-sort-down'),
+                up: sortRoot.querySelector('.metrics-sort-up'),
+                down: sortRoot.querySelector('.metrics-sort-down'),
             };
         }
 
         sortRoot = document.createElement('div');
         sortRoot.className = 'sort metrics-sort-indicator';
+        sortRoot.dataset.metricsSortRoot = '1';
 
         const info = document.createElement('i');
         info.className = 'icon icon-info not-filter-icon has-tooltip';
         info.style.display = 'none';
 
-        const stack = document.createElement('span');
-        stack.className = 'icon-stack';
-
         const up = document.createElement('i');
-        up.className = 'icon icon-sort icon-stack-1x faded';
+        up.className = 'icon icon-sort-up metrics-sort-up faded';
 
         const down = document.createElement('i');
-        down.className = 'icon icon-sort-down icon-stack-1x faded';
+        down.className = 'icon icon-sort-down metrics-sort-down faded';
 
-        stack.appendChild(up);
-        stack.appendChild(down);
         sortRoot.appendChild(info);
-        sortRoot.appendChild(stack);
+        sortRoot.appendChild(up);
+        sortRoot.appendChild(down);
         th.appendChild(sortRoot);
 
         return { root: sortRoot, up, down };
+    }
+
+    function normalizeMetricSortRoots(th) {
+        if (!th) return;
+        const sortRoots = Array.from(th.querySelectorAll('.sort'));
+        if (!sortRoots.length) {
+            return;
+        }
+
+        const metricRoot = sortRoots.find((el) => el.classList.contains('metrics-sort-indicator'));
+        if (!metricRoot) {
+            sortRoots.forEach((el) => el.remove());
+            return;
+        }
+        sortRoots.forEach((el) => {
+            if (el !== metricRoot) el.remove();
+        });
     }
 
     function applySortVisual(th, key) {
         const icon = ensureSortIcon(th);
         if (!icon.up || !icon.down) return;
 
-        icon.up.classList.add('faded');
-        icon.down.classList.add('faded');
+        setSortIconFaded(icon.up, true);
+        setSortIconFaded(icon.down, true);
+        setMetricSortDirection(icon, '');
 
         if (sortState.key !== key) {
             return;
         }
 
         if (sortState.asc) {
-            icon.up.classList.remove('faded');
+            setSortIconFaded(icon.up, false);
+            setMetricSortDirection(icon, 'asc');
         } else {
-            icon.down.classList.remove('faded');
+            setSortIconFaded(icon.down, false);
+            setMetricSortDirection(icon, 'desc');
         }
     }
 
+    function setSortIconFaded(el, faded) {
+        if (!el) return;
+        el.classList.toggle('faded', !!faded);
+        el.style.removeProperty('opacity');
+    }
+
+    function setMetricSortDirection(icon, direction) {
+        if (!icon || !icon.up || !icon.down) return;
+        if (icon.root) {
+            if (direction) {
+                icon.root.dataset.metricSortDir = direction;
+            } else {
+                delete icon.root.dataset.metricSortDir;
+            }
+        }
+        setSortIconFaded(icon.up, direction !== 'asc');
+        setSortIconFaded(icon.down, direction !== 'desc');
+    }
+
     function resetAllSortIcons(headerRow) {
-        const upIcons = headerRow.querySelectorAll('.sort .icon-sort');
+        const upIcons = headerRow.querySelectorAll('.sort .icon-sort, .sort .icon-sort-up');
         const downIcons = headerRow.querySelectorAll('.sort .icon-sort-down');
-        upIcons.forEach((el) => el.classList.add('faded'));
-        downIcons.forEach((el) => el.classList.add('faded'));
+        upIcons.forEach((el) => setSortIconFaded(el, true));
+        downIcons.forEach((el) => setSortIconFaded(el, true));
+        headerRow.querySelectorAll('th').forEach((th) => {
+            const key = metricSortKeyFromHeader(th);
+            if (key) {
+                const icon = ensureSortIcon(th);
+                setMetricSortDirection(icon, '');
+            } else {
+                clearNativeSortState(th);
+            }
+        });
+    }
+
+    function clearNativeSortState(th) {
+        if (!th) return;
+        th.removeAttribute('aria-sort');
+        [
+            'active',
+            'asc',
+            'desc',
+            'ascending',
+            'descending',
+            'sort-asc',
+            'sort-desc',
+            'sorted',
+            'sorted-asc',
+            'sorted-desc'
+        ].forEach((className) => th.classList.remove(className));
+        th.classList.add('metrics-native-sort-reset');
+        th.querySelectorAll('.sort:not(.metrics-sort-indicator) .icon, .sort:not(.metrics-sort-indicator) i').forEach((el) => {
+            setSortIconFaded(el, true);
+        });
+    }
+
+    function clearNativeSortReset(table) {
+        if (!table) return;
+        table.querySelectorAll('th.metrics-native-sort-reset').forEach((th) => {
+            th.classList.remove('metrics-native-sort-reset');
+        });
+    }
+
+    function resetMetricSortState(table) {
+        sortState.key = '';
+        sortState.asc = false;
+        nativeSortActive = true;
+        lastNativeSortAt = Date.now();
+        if (table) {
+            table.dataset.metricsSortMode = 'native';
+            clearNativeSortReset(table);
+            const headerRow = table.querySelector('thead tr');
+            if (headerRow) {
+                headerRow.querySelectorAll('th').forEach((th) => {
+                    const key = metricSortKeyFromHeader(th);
+                    if (!key) return;
+                    const icon = ensureSortIcon(th);
+                    setMetricSortDirection(icon, '');
+                });
+            }
+        }
     }
 
     function metricSortKeyFromHeader(th) {
@@ -2112,16 +2279,24 @@
     function handleMetricHeaderSortClick(event) {
         const target = event.target && event.target.nodeType === 1 ? event.target : (event.target && event.target.parentElement);
         const th = target && target.closest ? target.closest('th') : null;
+        if (!th) return;
         const key = metricSortKeyFromHeader(th);
-        if (!key) return;
-
         const table = th.closest('table');
         if (!table || !isPodTable(table)) return;
+
+        if (!key) {
+            resetMetricSortState(table);
+            setTimeout(() => enableMetricSorting(table), 0);
+            return;
+        }
 
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation();
 
+        nativeSortActive = false;
+        table.dataset.metricsSortMode = 'metric';
+        clearNativeSortReset(table);
         if (sortState.key === key) {
             sortState.asc = !sortState.asc;
         } else {
@@ -2134,8 +2309,21 @@
         setTimeout(() => applyMetricSort(table), 120);
     }
 
+    function handleNativeHeaderSortIntent(event) {
+        const target = event.target && event.target.nodeType === 1 ? event.target : (event.target && event.target.parentElement);
+        const th = target && target.closest ? target.closest('th') : null;
+        if (!th) return;
+        const table = th.closest('table');
+        if (!table || !isPodTable(table)) return;
+        if (metricSortKeyFromHeader(th)) return;
+        resetMetricSortState(table);
+        setTimeout(() => enableMetricSorting(table), 0);
+    }
+
     function applyMetricSort(table) {
         if (!table || !sortState.key) return;
+        if (nativeSortActive && Date.now() - lastNativeSortAt < CACHE_DURATION) return;
+        table.dataset.metricsSortMode = 'metric';
         addCustomColumns(table);
         applyPodColumnLayout(table);
         if (metricsCache || podResourcesCache) {
@@ -2147,6 +2335,8 @@
 
     function bindMetricHeaderSortHandler() {
         if (metricHeaderSortBound) return;
+        document.addEventListener('pointerdown', handleNativeHeaderSortIntent, true);
+        document.addEventListener('mousedown', handleNativeHeaderSortIntent, true);
         document.addEventListener('click', handleMetricHeaderSortClick, true);
         metricHeaderSortBound = true;
     }
@@ -2170,8 +2360,8 @@
             setImportantWidth(th, colWidthByKey(key));
             setColumnWidth(table, headers.indexOf(th), colWidthByKey(key));
             th.classList.add('metrics-sortable');
-            // Ensure metric columns always have native sort widget and default
-            // inactive style before applying current metric sort state.
+            // Reuse the same sort widget shape as native columns; metric clicks
+            // are intercepted and sorted locally because these columns are injected.
             ensureSortIcon(th);
             applySortVisual(th, key);
         });
@@ -2495,7 +2685,7 @@
             applyPodColumnLayout(table);
             if (data) {
                 updateTableWithMetrics(table, data);
-                if (!sortState.key && !isGroupedPodTable(table)) {
+                if (!sortState.key && !nativeSortActive && !isGroupedPodTable(table)) {
                     sortState.key = 'memoryUsage';
                     sortState.asc = false;
                 }
