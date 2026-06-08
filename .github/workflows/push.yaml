@@ -51,7 +51,7 @@ jobs:
           tags: "${{ steps.aliyun-meta.outputs.tags }}"
           context: package
           push: true
-      
+
       # docker hub multi-arch image
       - name: Login to Dockerhub
         uses: docker/login-action@v3
