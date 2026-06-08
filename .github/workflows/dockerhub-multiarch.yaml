@@ -69,22 +69,35 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Validate Docker Hub credentials
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || secrets.DOCKER_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN || secrets.DOCKER_PASSWORD || secrets.DOCKER_TOKEN }}
+      - name: Prepare Docker Hub credentials (lint-friendly)
         run: |
           set -euo pipefail
-          if [ -z "${DOCKERHUB_USERNAME}" ] || [ -z "${DOCKERHUB_TOKEN}" ]; then
+          # Prefer DOCKERHUB_* secrets, fall back to DOCKER_*
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
+            export DOCKERHUB_USERNAME="${{ secrets.DOCKERHUB_USERNAME }}"
+          else
+            export DOCKERHUB_USERNAME="${{ secrets.DOCKER_USERNAME }}"
+          fi
+
+          if [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            export DOCKERHUB_TOKEN="${{ secrets.DOCKERHUB_TOKEN }}"
+          elif [ -n "${{ secrets.DOCKER_PASSWORD }}" ]; then
+            export DOCKERHUB_TOKEN="${{ secrets.DOCKER_PASSWORD }}"
+          else
+            export DOCKERHUB_TOKEN="${{ secrets.DOCKER_TOKEN }}"
+          fi
+
+          if [ -z "${DOCKERHUB_USERNAME:-}" ] || [ -z "${DOCKERHUB_TOKEN:-}" ]; then
             echo "::error::Docker Hub credentials are missing. Configure repository secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN, or DOCKER_USERNAME and DOCKER_PASSWORD."
             exit 1
           fi
+        shell: bash
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME || secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN || secrets.DOCKER_PASSWORD || secrets.DOCKER_TOKEN }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Docker metadata
         id: meta
