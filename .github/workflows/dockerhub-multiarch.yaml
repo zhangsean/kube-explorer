@@ -97,9 +97,21 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           push: true
 
+      - name: Set VERSION for additional tags
+        run: |
+          echo "VERSION=${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}" >> $GITHUB_ENV
+
+      - name: Build and push arm64-only tag
+        uses: docker/build-push-action@v6
+        with:
+          context: package
+          platforms: linux/arm64
+          tags: ${{ env.IMAGE_NAME }}:${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}-arm64
+          push: true
+
       - name: Upload compressed binaries to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
-          files: dist/kube-explorer-linux-*.upx
+          files: package/kube-explorer-linux-*
