@@ -757,6 +757,7 @@
         const td = document.createElement('td');
         td.className = 'text-left';
         td.dataset.columnKey = key;
+        td.textContent = '-';
         td.style.padding = '8px';
         td.style.verticalAlign = 'middle';
         setImportantWidth(td, colWidthByKey(key));
@@ -775,6 +776,22 @@
 
     function ensurePodMetricCells(row, cpuIndex, memoryIndex) {
         if (!isPodDataRow(row)) return;
+
+        const table = row.closest('table');
+        const headerCellCount = table ? table.querySelectorAll('thead tr th').length : 0;
+        const currentCellCount = row.querySelectorAll('td').length;
+        const hasCpuCell = !!row.querySelector('td[data-column-key="cpuUsage"]');
+        const hasMemoryCell = !!row.querySelector('td[data-column-key="memoryUsage"]');
+
+        // Pending/ContainerCreating rows can omit both native metric slots.
+        // Empty IP and Node cells cannot be identified by their content, so use
+        // the header/body cell-count deficit to insert both metric placeholders
+        // before any positional inference labels later cells incorrectly.
+        if (!hasCpuCell && !hasMemoryCell && headerCellCount - currentCellCount >= 2) {
+            insertMetricCellAt(row, cpuIndex, 'cpuUsage');
+            insertMetricCellAt(row, memoryIndex, 'memoryUsage');
+            return;
+        }
 
         const ensureMetricCell = (index, key) => {
             if (index < 0) return;
