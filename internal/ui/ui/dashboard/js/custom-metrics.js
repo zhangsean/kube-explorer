@@ -37,6 +37,111 @@
     let rawPodsPromise = null;
     let rawNodesPromise = null;
     let rawPodMetricsPromise = null;
+    const RESOURCE_EDIT_RETURN_KEY = 'kubeExplorer.resourceEditReturnUrl';
+    let resourceReturnInProgress = false;
+
+    function parseDashboardUrl(value) {
+        try {
+            return new URL(value || window.location.href, window.location.href);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function getEditedResource(value) {
+        const url = parseDashboardUrl(value);
+        if (!url || url.origin !== window.location.origin || url.searchParams.get('mode') !== 'edit') return '';
+
+        const match = url.pathname.match(/\/explorer\/([^/]+)\/[^/]+\/[^/]+\/?$/);
+        return match ? match[1] : '';
+    }
+
+    function getListedResource(value) {
+        const url = parseDashboardUrl(value);
+        if (!url || url.origin !== window.location.origin) return '';
+
+        const match = url.pathname.match(/\/explorer\/([^/]+)\/?$/);
+        return match ? match[1] : '';
+    }
+
+    function rememberDeployEditSource(fromValue, toValue) {
+        if (!getEditedResource(toValue) || getEditedResource(fromValue)) return;
+
+        const source = parseDashboardUrl(fromValue);
+        if (!source || source.origin !== window.location.origin || !source.pathname.startsWith('/dashboard/')) return;
+
+        sessionStorage.setItem(RESOURCE_EDIT_RETURN_KEY, source.href);
+    }
+
+    function restoreDeployEditSource(fromValue, toValue) {
+        const editedResource = getEditedResource(fromValue);
+        if (resourceReturnInProgress || !editedResource || getListedResource(toValue) !== editedResource) return;
+
+        const returnUrl = parseDashboardUrl(sessionStorage.getItem(RESOURCE_EDIT_RETURN_KEY));
+        sessionStorage.removeItem(RESOURCE_EDIT_RETURN_KEY);
+        if (!returnUrl || returnUrl.origin !== window.location.origin || returnUrl.href === parseDashboardUrl(toValue).href) return;
+
+        resourceReturnInProgress = true;
+        // Redirect in the same navigation task, before Vue gets a chance to
+        // render and paint the intermediate resource list route.
+        window.location.replace(returnUrl.href);
+    }
+
+    function handleDeployEditNavigation(fromValue, toValue) {
+        rememberDeployEditSource(fromValue, toValue);
+        restoreDeployEditSource(fromValue, toValue);
+    }
+
+    function getRootRouter() {
+        const app = window.$globalApp || window.$nuxt || null;
+        return app && app.$router ? app.$router : null;
+    }
+
+    function replaceListTargetWithEditSource(router, target) {
+        const editedResource = getEditedResource(window.location.href);
+        if (!editedResource) return target;
+
+        let resolvedUrl = null;
+        try {
+            const resolved = router.resolve(target);
+            resolvedUrl = parseDashboardUrl(resolved && (resolved.href || (resolved.route && resolved.route.fullPath)));
+        } catch (e) {
+            return target;
+        }
+        if (!resolvedUrl || getListedResource(resolvedUrl.href) !== editedResource) return target;
+
+        const returnUrl = parseDashboardUrl(sessionStorage.getItem(RESOURCE_EDIT_RETURN_KEY));
+        if (!returnUrl || returnUrl.origin !== window.location.origin) return target;
+
+        sessionStorage.removeItem(RESOURCE_EDIT_RETURN_KEY);
+        resourceReturnInProgress = true;
+        const routerBase = ((router.options && router.options.base) || '/dashboard/').replace(/\/$/, '');
+        const routePath = returnUrl.pathname.startsWith(`${routerBase}/`)
+            ? returnUrl.pathname.slice(routerBase.length)
+            : returnUrl.pathname;
+        return `${routePath}${returnUrl.search}${returnUrl.hash}`;
+    }
+
+    function ensureResourceEditRouterGuard() {
+        const router = getRootRouter();
+        if (!router || router.__kubeExplorerEditReturnGuard) return;
+
+        const originalReplace = router.replace;
+        router.replace = function(target) {
+            arguments[0] = replaceListTargetWithEditSource(router, target);
+            return originalReplace.apply(this, arguments);
+        };
+        router.__kubeExplorerEditReturnGuard = true;
+    }
+
+    function rememberDirectEditReferrer() {
+        if (!getEditedResource(window.location.href)) return;
+
+        const referrer = parseDashboardUrl(document.referrer);
+        if (!referrer || referrer.origin !== window.location.origin || !referrer.pathname.startsWith('/dashboard/')) return;
+
+        sessionStorage.setItem(RESOURCE_EDIT_RETURN_KEY, referrer.href);
+    }
 
     function normalizeHeaderText(text) {
         return (text || '')
@@ -2710,6 +2815,7 @@
     }
 
     async function runProcessCycle() {
+        ensureResourceEditRouterGuard();
         if (isProcessing) {
             pendingProcess = true;
             return;
@@ -2768,6 +2874,8 @@
     }
 
     function init() {
+        rememberDirectEditReferrer();
+        ensureResourceEditRouterGuard();
         injectStyles();
 
         if (document.readyState === 'loading') {
@@ -2786,13 +2894,17 @@
 
         const originalPushState = history.pushState;
         history.pushState = function() {
+            const fromUrl = window.location.href;
             originalPushState.apply(this, arguments);
+            handleDeployEditNavigation(fromUrl, window.location.href);
             scheduleProcess(100);
         };
 
         const originalReplaceState = history.replaceState;
         history.replaceState = function() {
+            const fromUrl = window.location.href;
             originalReplaceState.apply(this, arguments);
+            handleDeployEditNavigation(fromUrl, window.location.href);
             scheduleProcess(200);
         };
 
