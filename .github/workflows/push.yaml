@@ -56,7 +56,7 @@ jobs:
         id: aliyun-meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.ALIYUN_REGISTRY }}/${{ vars.REPO || 'cnrancher' }}/${{ vars.IMAGE || 'kube-explorer' }}
+          images: ${{ env.ALIYUN_REGISTRY }}/zhangsean/kube-explorer
           tags: |
             type=ref,event=tag
             type=ref,event=branch,suffix=-head
