@@ -81,7 +81,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ vars.REPO || 'cnrancher' }}/${{ vars.IMAGE || 'kube-explorer' }}
+          images: zhangsean/kube-explorer
           tags: |
             type=ref,event=tag
       - name: Set up QEMU
