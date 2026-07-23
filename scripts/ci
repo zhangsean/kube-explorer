@@ -3,7 +3,11 @@ set -e
 
 cd $(dirname $0)
 
-./download
+if [ ! -f ../internal/ui/ui/dashboard/index.html ]; then
+  ./download
+else
+  echo "Using dashboard UI assets from the repository"
+fi
 ./validate
 ./build
 if [ -z "${SKIP_PACKAGE}" ]; then
