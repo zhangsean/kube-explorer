@@ -3,17 +3,12 @@ package server
 import (
 	"bytes"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-const (
-	listCacheTTL       = 30 * time.Second
-	defaultPageSize    = 100
-	maxReplicaSetLimit = 100
-)
+const listCacheTTL = 15 * time.Second
 
 var cachedListResponses = struct {
 	sync.Mutex
@@ -31,11 +26,8 @@ type cachedListResponse struct {
 
 func optimizeListRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		if shouldLoadAllPods(req) {
-			loadAllPods(req)
-		}
-		if shouldClampReplicaSetList(req) {
-			clampReplicaSetList(req)
+		if shouldLoadCompleteList(req) {
+			loadCompleteList(req)
 		}
 
 		if !isCacheableListRequest(req) {
@@ -64,42 +56,26 @@ func optimizeListRequests(next http.Handler) http.Handler {
 	})
 }
 
-func shouldLoadAllPods(req *http.Request) bool {
-	return req.Method == http.MethodGet &&
-		req.URL != nil &&
-		req.URL.Path == "/v1/pods" &&
-		req.URL.Query().Get("continue") == ""
+func shouldLoadCompleteList(req *http.Request) bool {
+	if req.Method != http.MethodGet || req.URL == nil || req.URL.Query().Get("continue") != "" {
+		return false
+	}
+
+	switch req.URL.Path {
+	case "/v1/pods", "/v1/apps.deployments", "/v1/apps.replicasets":
+		return true
+	default:
+		return false
+	}
 }
 
-func loadAllPods(req *http.Request) {
+func loadCompleteList(req *http.Request) {
 	query := req.URL.Query()
 	if query.Get("limit") == "" {
 		return
 	}
 	query.Del("limit")
 	req.URL.RawQuery = query.Encode()
-}
-
-func shouldClampReplicaSetList(req *http.Request) bool {
-	return req.Method == http.MethodGet &&
-		req.URL != nil &&
-		req.URL.Path == "/v1/apps.replicasets" &&
-		req.URL.Query().Get("continue") == ""
-}
-
-func clampReplicaSetList(req *http.Request) {
-	query := req.URL.Query()
-	limit := query.Get("limit")
-	if limit == "" {
-		query.Set("limit", strconv.Itoa(defaultPageSize))
-		req.URL.RawQuery = query.Encode()
-		return
-	}
-	value, err := strconv.Atoi(limit)
-	if err != nil || value <= 0 || value > maxReplicaSetLimit {
-		query.Set("limit", strconv.Itoa(maxReplicaSetLimit))
-		req.URL.RawQuery = query.Encode()
-	}
 }
 
 func isCacheableListRequest(req *http.Request) bool {
@@ -111,7 +87,7 @@ func isCacheableListRequest(req *http.Request) bool {
 		return false
 	}
 	switch req.URL.Path {
-	case "/v1/pods", "/v1/nodes", "/v1/metrics.k8s.io.pods", "/v1/apps.replicasets":
+	case "/v1/pods", "/v1/nodes", "/v1/metrics.k8s.io.pods", "/v1/metrics.k8s.io.nodes", "/v1/apps.deployments", "/v1/apps.replicasets":
 		return true
 	default:
 		return false

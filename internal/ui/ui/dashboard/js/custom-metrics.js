@@ -16,8 +16,8 @@
     let nodeResourceSummaryCache = {};
     let lastFetchTime = 0;
     let lastNodeFetchTime = 0;
-    const CACHE_DURATION = 10000;
-    const REFRESH_INTERVAL = 10000;
+    const CACHE_DURATION = 15000;
+    const REFRESH_INTERVAL = 15000;
     const ENABLE_NODE_POD_ENHANCEMENTS = true;
     const MIN_PROCESS_GAP = 700;
     let processTimer = null;
@@ -31,12 +31,17 @@
     let rawPodsCache = null;
     let rawNodesCache = null;
     let rawPodMetricsCache = null;
+    let rawNodeMetricsCache = null;
     let rawPodsFetchedAt = 0;
     let rawNodesFetchedAt = 0;
     let rawPodMetricsFetchedAt = 0;
+    let rawNodeMetricsFetchedAt = 0;
     let rawPodsPromise = null;
     let rawNodesPromise = null;
     let rawPodMetricsPromise = null;
+    let rawNodeMetricsPromise = null;
+    const pendingPodTableRefreshes = new Map();
+    let podTableRefreshScheduled = false;
     const RESOURCE_EDIT_RETURN_KEY = 'kubeExplorer.resourceEditReturnUrl';
     let resourceReturnInProgress = false;
 
@@ -403,8 +408,8 @@
             .node-inline-summary .metric-block {
                 display: inline-flex;
                 align-items: center;
-                gap: 8px;
-                min-width: 200px;
+                gap: 6px;
+                min-width: 150px;
                 white-space: nowrap;
             }
 
@@ -418,6 +423,22 @@
 
             .node-inline-host {
                 position: relative;
+            }
+
+            .kube-explorer-compact-node-table tbody tr.main-row.has-sub-row > td {
+                padding-top: 7px !important;
+                padding-bottom: 3px !important;
+                vertical-align: middle !important;
+            }
+
+            .kube-explorer-compact-node-table tbody tr.sub-row > td {
+                padding-top: 0 !important;
+                padding-bottom: 3px !important;
+                line-height: 1.15 !important;
+            }
+
+            .node-usage-progress .metrics-value {
+                min-width: 44px;
             }
 
             .side-menu {
@@ -708,12 +729,120 @@
         return bodies.some((tbody) => Array.from(tbody.querySelectorAll('tr')).some((row) => isPodGroupRow(row)));
     }
 
+    function isPodTransitionRow(row) {
+        return !!row && (row.dataset.kubeExplorerPodTransition === 'true' ||
+            /containers with unready status/i.test(metricCellText(row)));
+    }
+
+    function hasPodDataRows(table) {
+        return getTableBodies(table).some((tbody) => {
+            return Array.from(tbody.querySelectorAll('tr')).some((row) => isPodDataRow(row));
+        });
+    }
+
+    function setPodTransitionRowText(row, table) {
+        if (!row) return;
+        const text = isEnglishLocale() ? 'Waiting for Pod instance to be created…' : '正在等待 Pod 实例创建…';
+        const cell = row.querySelector('td') || row;
+        row.hidden = false;
+        row.style.removeProperty('display');
+        row.removeAttribute('aria-hidden');
+        if (metricCellText(cell) !== text) cell.textContent = text;
+        if (cell !== row && table) {
+            const headerCount = table.querySelectorAll('thead tr th').length;
+            if (headerCount > 0) cell.setAttribute('colspan', String(headerCount));
+        }
+        row.dataset.kubeExplorerPodTransition = 'true';
+    }
+
+    function reconcilePodTransitionRows(table) {
+        if (!table) return false;
+        const rows = getTableBodies(table).flatMap((tbody) => {
+            return Array.from(tbody.querySelectorAll('tr')).filter((row) => isPodTransitionRow(row));
+        });
+        if (!rows.length) return hasPodDataRows(table);
+
+        const hasDataRows = hasPodDataRows(table);
+        rows.forEach((row) => {
+            if (hasDataRows) {
+                // Keep Vue's DOM tree intact. Removing a framework-owned row
+                // here can make its next route/table patch fail and leave the
+                // URL pointing at a new page while the old view stays mounted.
+                row.hidden = true;
+                row.style.setProperty('display', 'none', 'important');
+                row.setAttribute('aria-hidden', 'true');
+            } else {
+                setPodTransitionRowText(row, table);
+            }
+        });
+        return hasDataRows;
+    }
+
+    function collectTablesFromNode(node, tables) {
+        if (!node) return;
+        const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+        if (!element) return;
+
+        const closestTable = element.closest && element.closest('table');
+        if (closestTable) tables.add(closestTable);
+        if (element.tagName === 'TABLE') tables.add(element);
+        if (element.querySelectorAll) {
+            element.querySelectorAll('table').forEach((table) => tables.add(table));
+        }
+    }
+
+    function scheduleAfterVueUpdate(callback) {
+        const app = window.$globalApp || window.$nuxt || null;
+        const beforePaint = () => window.requestAnimationFrame(callback);
+        if (app && typeof app.$nextTick === 'function') {
+            app.$nextTick(beforePaint);
+        } else {
+            Promise.resolve().then(beforePaint);
+        }
+    }
+
+    function queuePodTableRefresh(table, expectedHref = window.location.href) {
+        if (!table || !table.isConnected) return;
+        pendingPodTableRefreshes.set(table, expectedHref);
+        if (podTableRefreshScheduled) return;
+
+        podTableRefreshScheduled = true;
+        scheduleAfterVueUpdate(() => {
+            podTableRefreshScheduled = false;
+            const refreshes = Array.from(pendingPodTableRefreshes.entries());
+            pendingPodTableRefreshes.clear();
+            refreshes.forEach(([pendingTable, routeHref]) => {
+                if (window.location.href !== routeHref || !pendingTable.isConnected) return;
+                refreshPodMetricTableFromCache(pendingTable);
+            });
+        });
+    }
+
+    function refreshPodMetricTableFromCache(table) {
+        if (!table || !table.isConnected || !isPodTable(table)) return;
+        if (!reconcilePodTransitionRows(table)) return;
+        if (lastFetchTime <= 0 && Object.keys(metricsCache).length === 0 && Object.keys(podResourcesCache).length === 0) return;
+
+        // A complete SortableTable can be replaced during route or watch
+        // updates. Install the active metric sort before the next paint so the
+        // replacement does not briefly render Dashboard's native Name order.
+        if (!sortState.key && !nativeSortActive && !isGroupedPodTable(table)) {
+            sortState.key = 'memoryUsage';
+            sortState.asc = false;
+        }
+        if (sortState.key && !nativeSortActive) {
+            sortSortableTableRowsByMetric(table, sortState.key, sortState.asc, metricsCache, false);
+        }
+        addCustomColumns(table);
+        applyPodColumnLayout(table);
+        updateTableWithMetrics(table, { metrics: metricsCache, resources: podResourcesCache });
+        enableMetricSorting(table);
+    }
+
     function isPodGroupRow(row) {
         if (!row) return true;
         const className = (row.className || '').toString().toLowerCase();
-        const rowText = metricCellText(row).toLowerCase();
         if (className.includes('sub-row') || className.includes('state-description')) return false;
-        if (rowText.includes('containers with unready status')) return false;
         if (row.querySelector('td[colspan]')) return true;
         if (className.includes('group')) return true;
         const cells = Array.from(row.querySelectorAll('td'));
@@ -1357,7 +1486,8 @@
         const hasPods = hasAnyHeader(headerTexts, ['pods', 'pod', 'pods\u6570', 'pod\u6570\u91cf']);
         if ((hasName || hasNameZh) && (hasOS || hasOSZh) && hasCPU && (hasRAM || hasRAMZh) && (hasPods || hasPodsZh)) return true;
         const nodeLinks = table.querySelectorAll('tbody a[href*="/node/"]');
-        return nodeLinks.length > 0;
+        const podLinks = table.querySelectorAll('tbody a[href*="/pod/"]');
+        return nodeLinks.length > 0 && podLinks.length === 0;
     }
 
     function findNodeTables() {
@@ -1748,45 +1878,6 @@
         return Array.from(keys);
     }
 
-    function normalizePodNameForMatch(value) {
-        return normalizeKey(value).replace(/\s+/g, '');
-    }
-
-    function extractPodRowNames(row) {
-        const names = new Set();
-        const addName = (value) => {
-            const normalized = normalizePodNameForMatch(value);
-            if (normalized) names.add(normalized);
-        };
-
-        const ref = extractPodRefFromRow(row);
-        if (ref && ref.name) addName(ref.name);
-
-        row.querySelectorAll('a[href]').forEach((link) => {
-            addName(link.textContent);
-            const href = link.getAttribute('href') || '';
-            const match = href.match(/\/pod\/([^\/?#]+)\/([^\/?#]+)/i);
-            if (match) addName(decodeURIComponent(match[2]));
-        });
-
-        const cells = row.querySelectorAll('td');
-        if (cells[1]) addName(cells[1].textContent);
-
-        return Array.from(names);
-    }
-
-    function extractUnreadyStatusPodName(row) {
-        const text = metricCellText(row);
-        if (!/containers with unready status/i.test(text)) return '';
-        const match = text.match(/\[([^\]]+)\]/);
-        return match ? normalizePodNameForMatch(match[1]) : '';
-    }
-
-    function podNameMatchesAlert(podName, alertName) {
-        if (!podName || !alertName) return false;
-        return podName === alertName || podName.startsWith(`${alertName}-`);
-    }
-
     async function fetchJSON(candidates, endpointName) {
         let lastError = null;
         for (const url of candidates) {
@@ -1884,6 +1975,12 @@
         ], 'pod metrics');
     }
 
+    async function fetchNodeMetricsJSON() {
+        return fetchJSON([
+            '/v1/metrics.k8s.io.nodes?exclude=metadata.managedFields',
+        ], 'node metrics');
+    }
+
     async function getPodsData() {
         const now = Date.now();
         if (rawPodsCache && now - rawPodsFetchedAt < CACHE_DURATION) {
@@ -1944,6 +2041,26 @@
         return rawPodMetricsPromise;
     }
 
+    async function getNodeMetricsData() {
+        const now = Date.now();
+        if (rawNodeMetricsCache && now - rawNodeMetricsFetchedAt < CACHE_DURATION) {
+            return rawNodeMetricsCache;
+        }
+        if (rawNodeMetricsPromise) {
+            return rawNodeMetricsPromise;
+        }
+        rawNodeMetricsPromise = fetchNodeMetricsJSON()
+            .then((data) => {
+                rawNodeMetricsCache = data;
+                rawNodeMetricsFetchedAt = Date.now();
+                return data;
+            })
+            .finally(() => {
+                rawNodeMetricsPromise = null;
+            });
+        return rawNodeMetricsPromise;
+    }
+
     function getNodeResourceCapacity(node) {
         const allocatable = (node && node.status && node.status.allocatable) || {};
         const capacity = (node && node.status && node.status.capacity) || {};
@@ -1962,9 +2079,14 @@
         }
 
         try {
-            const [nodesData, podsData] = await Promise.all([getNodesData(), getPodsData()]);
+            const [nodesData, podsData, nodeMetricsData] = await Promise.all([
+                getNodesData(),
+                getPodsData(),
+                getNodeMetricsData()
+            ]);
             const nodes = nodesData.data || [];
             const pods = podsData.data || [];
+            const nodeMetrics = nodeMetricsData.data || [];
             const summary = {};
 
             nodes.forEach((node) => {
@@ -1977,8 +2099,20 @@
                     cpuRequest: 0,
                     cpuLimit: 0,
                     memoryRequest: 0,
-                    memoryLimit: 0
+                    memoryLimit: 0,
+                    cpuUsage: 0,
+                    memoryUsage: 0
                 };
+            });
+
+            nodeMetrics.forEach((metric) => {
+                const name = normalizeKey(
+                    (metric && metric.metadata && metric.metadata.name) || (metric && metric.id)
+                );
+                if (!name || !summary[name]) return;
+                const usage = metric.usage || {};
+                summary[name].cpuUsage = parseCPUValue(usage.cpu || 0);
+                summary[name].memoryUsage = parseMemoryValue(usage.memory || 0);
             });
 
             pods.forEach((pod) => {
@@ -2035,9 +2169,8 @@
         }
 
         try {
-            const podsData = await getPodsData();
+            const [podsData, podMetricsData] = await Promise.all([getPodsData(), getPodMetricsData()]);
             const pods = podsData.data || [];
-            const podMetricsData = await getPodMetricsData();
             const podMetrics = podMetricsData.data || [];
 
             podResourcesCache = {};
@@ -2176,10 +2309,10 @@
         }
     }
 
-    function getRowMetricValue(row, key, metrics) {
-        const rowKeys = extractRowPodKeys(row);
-        for (const k of rowKeys) {
-            const entry = metrics && metrics[k];
+    function getPodMetricValue(pod, key, metrics) {
+        const podKeys = getPodKeys(pod);
+        for (const podKey of podKeys) {
+            const entry = metrics && metrics[normalizeKey(podKey)];
             if (entry) {
                 return key === 'cpuUsage' ? (entry.cpuUsageValue || 0) : (entry.memoryUsageValue || 0);
             }
@@ -2187,52 +2320,188 @@
         return 0;
     }
 
-    function sortRowsByMetric(table, key, asc, metrics) {
-        const bodies = getTableBodies(table);
-        if (!bodies.length) return;
-        bodies.forEach((tbody) => {
-            const rows = Array.from(tbody.children).filter((el) => el.tagName === 'TR');
-            const groupRows = rows.filter((row) => isPodGroupRow(row));
-            const sortableRows = rows.filter((row) => !isPodGroupRow(row));
-            const blocks = [];
-            const unmatchedRows = [];
+    function findSortableTableComponent(table) {
+        const seen = new Set();
+        const candidates = [
+            table,
+            table && table.tHead,
+            table && table.querySelector('thead'),
+            table && table.querySelector('thead th'),
+            table && table.querySelector('tbody'),
+            table && table.querySelector('tbody td')
+        ].filter(Boolean);
 
-            sortableRows.forEach((row) => {
-                if (isPodDataRow(row)) {
-                    blocks.push({ row, names: extractPodRowNames(row), extra: [] });
+        // Dashboard does not consistently expose __vue__ on the table root.
+        // Depending on the render path it may be attached to THEAD, a cell, or
+        // a formatter component. Walk those component parent chains before
+        // falling back to DOM row moves, which would desynchronise Vue's VDOM.
+        for (const candidate of candidates) {
+            let component = candidate.__vue__;
+            while (component && !seen.has(component)) {
+                seen.add(component);
+                if (component.$options && component.$options.name === 'SortableTable') {
+                    return component;
                 }
-            });
+                component = component.$parent;
+            }
+        }
 
-            sortableRows.forEach((row) => {
-                if (isPodDataRow(row)) return;
-
-                const alertName = extractUnreadyStatusPodName(row);
-                const matched = alertName
-                    ? blocks.find((block) => block.names.some((name) => podNameMatchesAlert(name, alertName)))
-                    : null;
-
-                if (matched) {
-                    matched.extra.push(row);
-                } else if (blocks.length) {
-                    blocks[blocks.length - 1].extra.push(row);
-                } else {
-                    unmatchedRows.push(row);
+        let element = table && table.parentElement;
+        while (element) {
+            let component = element.__vue__;
+            while (component && !seen.has(component)) {
+                seen.add(component);
+                if (component.$options && component.$options.name === 'SortableTable') {
+                    return component;
                 }
-            });
+                component = component.$parent;
+            }
+            element = element.parentElement;
+        }
+        return null;
+    }
 
-            blocks.sort((a, b) => {
-                const av = getRowMetricValue(a.row, key, metrics);
-                const bv = getRowMetricValue(b.row, key, metrics);
-                return asc ? av - bv : bv - av;
-            });
+    function comparePodsByMetric(a, b, key, asc, metrics) {
+        const av = getPodMetricValue(a, key, metrics);
+        const bv = getPodMetricValue(b, key, metrics);
+        if (av !== bv) return asc ? av - bv : bv - av;
+        return normalizeKey(a && a.id).localeCompare(normalizeKey(b && b.id));
+    }
 
-            groupRows.forEach((row) => tbody.appendChild(row));
-            blocks.forEach((block) => {
-                tbody.appendChild(block.row);
-                block.extra.forEach((row) => tbody.appendChild(row));
-            });
-            unmatchedRows.forEach((row) => tbody.appendChild(row));
+    function invalidateSortableComputedRows(sortable) {
+        if (!sortable) return;
+        const watchers = sortable._computedWatchers || {};
+        ['arrangedRows', 'filteredRows', 'pagedRows', 'groupedRows', 'displayRows'].forEach((name) => {
+            if (watchers[name]) watchers[name].dirty = true;
         });
+        sortable.previousResult = null;
+        sortable.$forceUpdate();
+    }
+
+    function sortableRowsSignature(sortable) {
+        const rows = sortable && Array.isArray(sortable.rows) ? sortable.rows : [];
+        return rows.map((row, index) => {
+            const id = normalizeKey(row && row.id) || String(index);
+            const resourceVersion = normalizeKey(row && row.metadata && row.metadata.resourceVersion);
+            return `${id}:${resourceVersion}`;
+        }).join('|');
+    }
+
+    function refreshSortableRenderedMetrics(sortable, table, expectedHref = window.location.href) {
+        if (!sortable || typeof sortable.$nextTick !== 'function') return;
+        sortable.$nextTick(() => {
+            if (window.location.href !== expectedHref || sortable._isDestroyed || sortable._isBeingDestroyed) return;
+            const liveTable = sortable.$el && sortable.$el.querySelector
+                ? sortable.$el.querySelector('table')
+                : table;
+            if (!liveTable || !liveTable.isConnected || !reconcilePodTransitionRows(liveTable)) return;
+            addCustomColumns(liveTable);
+            applyPodColumnLayout(liveTable);
+            updateTableWithMetrics(liveTable, { metrics: metricsCache, resources: podResourcesCache });
+            enableMetricSorting(liveTable);
+        });
+    }
+
+    function ensureSortableRowsWatch(sortable, table) {
+        if (!sortable || typeof sortable.$watch !== 'function') return false;
+        sortable.__kubeExplorerMetricTable = table;
+        if (sortable.__kubeExplorerMetricRowsUnwatch) return true;
+
+        sortable.__kubeExplorerMetricRowsUnwatch = sortable.$watch(
+            () => sortableRowsSignature(sortable),
+            (currentSignature, previousSignature) => {
+                if (currentSignature === previousSignature || !sortable.__kubeExplorerMetricSort) return;
+
+                // Dashboard may mutate the workload Pod array in place during
+                // a rolling update. Explicitly invalidate the whole table
+                // chain in the same tick so a newly-created Pod cannot wait
+                // for the next 15-second metrics refresh before appearing.
+                invalidateSortableComputedRows(sortable);
+                refreshSortableRenderedMetrics(
+                    sortable,
+                    sortable.__kubeExplorerMetricTable,
+                    window.location.href
+                );
+            },
+            { sync: true }
+        );
+        return true;
+    }
+
+    function ensureSortableMetricSortHook(sortable) {
+        const watcher = sortable && sortable._computedWatchers
+            ? sortable._computedWatchers.arrangedRows
+            : null;
+        if (!watcher || typeof watcher.getter !== 'function') return false;
+        if (watcher.__kubeExplorerMetricSortOriginalGetter) return true;
+
+        const originalGetter = watcher.getter;
+        watcher.__kubeExplorerMetricSortOriginalGetter = originalGetter;
+        watcher.getter = function() {
+            const rows = originalGetter.apply(this, arguments);
+            const state = this.__kubeExplorerMetricSort;
+            if (!state || !Array.isArray(rows)) return rows;
+            return rows.slice().sort((a, b) => {
+                return comparePodsByMetric(a, b, state.key, state.asc, state.metrics);
+            });
+        };
+        watcher.dirty = true;
+        return true;
+    }
+
+    function invalidateSortableTableOrder(table) {
+        const sortable = findSortableTableComponent(table);
+        if (!sortable || sortable.externalPaginationEnabled) return false;
+
+        // The native cachedRows array remains untouched by the metric hook, so
+        // clearing its state immediately restores Dashboard's own sort fields.
+        if (!sortable.__kubeExplorerMetricSort) return true;
+        sortable.__kubeExplorerMetricSort = null;
+        invalidateSortableComputedRows(sortable);
+        return true;
+    }
+
+    function sortSortableTableRowsByMetric(table, key, asc, metrics, resetPage) {
+        const sortable = findSortableTableComponent(table);
+        if (!sortable || sortable.externalPaginationEnabled ||
+            !ensureSortableMetricSortHook(sortable) || !ensureSortableRowsWatch(sortable, table)) {
+            return false;
+        }
+
+        const previousState = sortable.__kubeExplorerMetricSort;
+        const sortChanged = !previousState || previousState.key !== key || previousState.asc !== asc;
+        const metricsChanged = !previousState || previousState.metrics !== metrics;
+        const pageChanged = !!resetPage && sortable.page !== 1;
+        sortable.__kubeExplorerMetricSort = { key, asc, metrics };
+        if (resetPage) {
+            if (typeof sortable.setPage === 'function') {
+                sortable.setPage(1);
+            } else {
+                sortable.page = 1;
+            }
+        }
+
+        const expectedHref = window.location.href;
+        const refreshRenderedMetrics = () => refreshSortableRenderedMetrics(sortable, table, expectedHref);
+
+        // Explicit sort/metric changes need to invalidate the computed chain
+        // because the metrics map itself is not Vue-reactive. Row changes are
+        // handled independently by ensureSortableRowsWatch().
+        if (sortChanged || metricsChanged) {
+            invalidateSortableComputedRows(sortable);
+            refreshRenderedMetrics();
+        } else if (pageChanged) {
+            refreshRenderedMetrics();
+        }
+        return true;
+    }
+
+    function sortRowsByMetric(table, key, asc, metrics, resetPage) {
+        if (sortSortableTableRowsByMetric(table, key, asc, metrics, resetPage)) return;
+
+        // Never move Vue-owned TR elements as a fallback. If the component is
+        // temporarily unavailable while the route/table is being replaced,
+        // leave Dashboard's native order intact and retry on the next update.
     }
 
     function ensureSortIcon(th) {
@@ -2376,6 +2645,7 @@
         nativeSortActive = true;
         lastNativeSortAt = Date.now();
         if (table) {
+            invalidateSortableTableOrder(table);
             table.dataset.metricsSortMode = 'native';
             clearNativeSortReset(table);
             const headerRow = table.querySelector('thead tr');
@@ -2426,7 +2696,7 @@
             sortState.asc = false;
         }
 
-        applyMetricSort(table);
+        applyMetricSort(table, true);
         setTimeout(() => applyMetricSort(table), 0);
         setTimeout(() => applyMetricSort(table), 120);
     }
@@ -2442,7 +2712,7 @@
         setTimeout(() => enableMetricSorting(table), 0);
     }
 
-    function applyMetricSort(table) {
+    function applyMetricSort(table, resetPage) {
         if (!table || !sortState.key) return;
         if (nativeSortActive && Date.now() - lastNativeSortAt < CACHE_DURATION) return;
         table.dataset.metricsSortMode = 'metric';
@@ -2451,7 +2721,7 @@
         if (metricsCache || podResourcesCache) {
             updateTableWithMetrics(table, { metrics: metricsCache, resources: podResourcesCache });
         }
-        sortRowsByMetric(table, sortState.key, sortState.asc, metricsCache);
+        sortRowsByMetric(table, sortState.key, sortState.asc, metricsCache, resetPage);
         enableMetricSorting(table);
     }
 
@@ -2553,10 +2823,15 @@
             const text = normalizeHeaderText(th.textContent);
             if (!text) return;
             if ((text === 'name' || text === '\u540d\u79f0') && typeof result.name !== 'number') result.name = index;
-            if ((text.startsWith('version') || text.includes('鐗堟湰')) && typeof result.version !== 'number') result.version = index;
-            if ((text.startsWith('externalinternalip') || text.includes('\u5185\u90e8ip') || text.includes('externalinternalip')) && typeof result.ip !== 'number') result.ip = index;
+            if ((text.startsWith('roles') || text.startsWith('role') || text.includes('\u89d2\u8272')) && typeof result.roles !== 'number') result.roles = index;
+            if ((text.startsWith('version') || text.includes('\u7248\u672c')) && typeof result.version !== 'number') result.version = index;
+            if ((text.startsWith('externalinternalip') || text.includes('internalip') ||
+                text.includes('\u5185\u90e8ip') || text.includes('\u5185\u7f51ip')) && typeof result.ip !== 'number') result.ip = index;
+            if ((text === 'os' || text.startsWith('operatingsystem') || text.includes('\u64cd\u4f5c\u7cfb\u7edf')) && typeof result.os !== 'number') result.os = index;
             if (text.startsWith('cpu') && typeof result.cpu !== 'number') result.cpu = index;
             if ((text.startsWith('ram') || text.startsWith('memory') || text.includes('\u5185\u5b58')) && typeof result.ram !== 'number') result.ram = index;
+            if ((text === 'pod' || text === 'pods' || text.startsWith('pod\u6570')) && typeof result.pods !== 'number') result.pods = index;
+            if ((text.startsWith('age') || text.includes('\u5b58\u6d3b\u65f6\u95f4') || text.includes('\u5e74\u9f84')) && typeof result.age !== 'number') result.age = index;
         });
         return result;
     }
@@ -2565,24 +2840,35 @@
         if (!table || !headerIndexes) return;
         const headerRow = table.querySelector('thead tr');
         if (!headerRow) return;
-        const layoutSig = `${headerIndexes.version}|${headerIndexes.ip}|${headerIndexes.cpu}|${headerIndexes.ram}|170|340|200|200`;
+        const widths = {
+            name: '220px',
+            roles: '180px',
+            version: '150px',
+            ip: '180px',
+            os: '100px',
+            cpu: '150px',
+            ram: '150px',
+            pods: '96px',
+            age: '96px'
+        };
+        const layoutSig = Object.keys(widths)
+            .map((key) => `${key}:${headerIndexes[key]}:${widths[key]}`)
+            .join('|');
         const lastSig = table.dataset.nodeLayoutSig || '';
 
         const headers = headerRow.querySelectorAll('th');
         const setHeaderWidth = (index, width) => {
             if (typeof index !== 'number' || index < 0 || !headers[index]) return;
-            headers[index].style.width = width;
-            headers[index].style.minWidth = width;
+            setImportantWidth(headers[index], width);
+            headers[index].style.setProperty('white-space', 'nowrap', 'important');
+            setColumnWidth(table, index, width);
         };
 
         if (lastSig !== layoutSig) {
-            // Rebalance Node list columns: shrink Version, slightly widen IP, keep CPU/RAM roomy.
-            setHeaderWidth(headerIndexes.version, '170px');
-            setHeaderWidth(headerIndexes.ip, '340px');
-            setHeaderWidth(headerIndexes.cpu, '200px');
-            setHeaderWidth(headerIndexes.ram, '200px');
+            Object.keys(widths).forEach((key) => setHeaderWidth(headerIndexes[key], widths[key]));
             table.dataset.nodeLayoutSig = layoutSig;
         }
+        table.classList.add('kube-explorer-compact-node-table');
 
         const tbody = table.querySelector('tbody');
         if (!tbody) return;
@@ -2592,14 +2878,10 @@
             const cells = row.querySelectorAll('td');
             const setCellWidth = (index, width) => {
                 if (typeof index !== 'number' || index < 0 || !cells[index]) return;
-                cells[index].style.width = width;
-                cells[index].style.minWidth = width;
+                setImportantWidth(cells[index], width);
             };
 
-            setCellWidth(headerIndexes.version, '170px');
-            setCellWidth(headerIndexes.ip, '340px');
-            setCellWidth(headerIndexes.cpu, '200px');
-            setCellWidth(headerIndexes.ram, '200px');
+            Object.keys(widths).forEach((key) => setCellWidth(headerIndexes[key], widths[key]));
             row.dataset.nodeLayoutSigApplied = layoutSig;
         });
     }
@@ -2663,12 +2945,61 @@
         }
     }
 
+    function ensureNodeUsageProgress(cell) {
+        let root = cell.querySelector('.node-usage-progress');
+        if (root) return root;
+
+        root = document.createElement('div');
+        root.className = 'metrics-progress-container node-usage-progress';
+        const mainLine = document.createElement('div');
+        mainLine.className = 'metrics-main-line';
+        const track = document.createElement('span');
+        track.className = 'metrics-progress-bar';
+        const indicator = document.createElement('span');
+        indicator.className = 'metrics-progress-fill';
+        const value = document.createElement('span');
+        value.className = 'metrics-value';
+
+        track.appendChild(indicator);
+        mainLine.appendChild(track);
+        mainLine.appendChild(value);
+        root.appendChild(mainLine);
+        cell.textContent = '';
+        cell.style.background = 'transparent';
+        cell.appendChild(root);
+        return root;
+    }
+
+    function updateNodeUsageCell(cell, usage, total) {
+        if (!cell || !isFinite(usage) || !isFinite(total) || total <= 0) return;
+        const percent = Math.max(0, (usage / total) * 100);
+        const percentText = formatPercent(percent);
+        const width = `${Math.min(percent, 100)}%`;
+
+        // Use the same progress-bar structure and sizing as Pod CPU/RAM cells
+        // in every locale instead of retaining Dashboard's smaller Node bar.
+        const progress = ensureNodeUsageProgress(cell);
+        const value = progress.querySelector('.metrics-value');
+        const indicator = progress.querySelector('.metrics-progress-fill');
+        if (value && value.textContent !== percentText) value.textContent = percentText;
+        if (indicator) {
+            if (indicator.style.width !== width) indicator.style.width = width;
+            indicator.classList.toggle('limit-warning', percent >= 90);
+        }
+        cell.dataset.nodeUsageSource = 'metrics-api-pod-style';
+    }
+
+    function isNodeMetaText(value) {
+        const text = normalizeHeaderText(value);
+        return text.includes('taints') || text.includes('labels') ||
+            text.includes('\u6c61\u70b9') || text.includes('\u6807\u7b7e');
+    }
+
     function findNodeMetaRow(mainRow) {
         let next = mainRow ? mainRow.nextElementSibling : null;
         while (next) {
             if (next.querySelector('a[href*="/node/"]')) return null;
-            const text = (next.textContent || '').toLowerCase();
-            if (text.includes('taints:') || text.includes('labels:')) return next;
+            if (isNodeMetaText(next.textContent)) return next;
             if (next.querySelector('td[colspan]')) return null;
             next = next.nextElementSibling;
         }
@@ -2683,8 +3014,7 @@
     function updateNodeInlineSummary(metaRow, summary, table, headerIndexes) {
         if (!metaRow || !summary) return;
         const hostCell = Array.from(metaRow.querySelectorAll('td')).find((td) => {
-            const text = (td.textContent || '').toLowerCase();
-            return text.includes('taints:') || text.includes('labels:');
+            return isNodeMetaText(td.textContent);
         });
         if (!hostCell) return;
 
@@ -2710,21 +3040,23 @@
             const cpuRect = cpuHeader.getBoundingClientRect();
             const ramRect = ramHeader.getBoundingClientRect();
             const cpuLeft = Math.max(8, Math.round(cpuRect.left - hostRect.left));
-            const gap = Math.max(12, Math.round(ramRect.left - cpuRect.left - 200));
+            const cpuWidth = Math.max(150, Math.round(cpuRect.width));
+            const ramWidth = Math.max(150, Math.round(ramRect.width));
+            const gap = Math.max(6, Math.round(ramRect.left - cpuRect.left - cpuWidth));
             const cpuBlock = container.querySelector('.cpu-block');
             const ramBlock = container.querySelector('.ram-block');
             const layoutSig = [
                 cpuLeft,
-                Math.max(180, Math.round(cpuRect.width)),
-                Math.max(180, Math.round(ramRect.width)),
+                cpuWidth,
+                ramWidth,
                 gap
             ].join('|');
             if (container.dataset.layoutSig !== layoutSig) {
                 container.dataset.layoutSig = layoutSig;
                 container.style.left = `${cpuLeft}px`;
                 container.style.marginLeft = '0px';
-                if (cpuBlock) cpuBlock.style.minWidth = `${Math.max(180, Math.round(cpuRect.width))}px`;
-                if (ramBlock) ramBlock.style.minWidth = `${Math.max(180, Math.round(ramRect.width))}px`;
+                if (cpuBlock) cpuBlock.style.minWidth = `${cpuWidth}px`;
+                if (ramBlock) ramBlock.style.minWidth = `${ramWidth}px`;
                 if (ramBlock) ramBlock.style.marginLeft = `${gap}px`;
             }
         }
@@ -2790,6 +3122,14 @@
             const summary = summaryMap[nodeName];
             if (!summary) return;
 
+            const cells = row.querySelectorAll('td');
+            if (cpuIndex >= 0 && cells[cpuIndex]) {
+                updateNodeUsageCell(cells[cpuIndex], summary.cpuUsage, summary.cpuTotal);
+            }
+            if (ramIndex >= 0 && cells[ramIndex]) {
+                updateNodeUsageCell(cells[ramIndex], summary.memoryUsage, summary.memoryTotal);
+            }
+
             const metaRow = findNodeMetaRow(row);
             if (metaRow) {
                 updateNodeInlineSummary(metaRow, summary, table, headerIndexes);
@@ -2798,35 +3138,24 @@
     }
 
     async function processPodsPage() {
+        const routeHref = window.location.href;
         const tables = findPodTables();
         if (!tables.length) return;
 
         const data = await fetchPodMetrics();
-        tables.forEach((table) => {
-            addCustomColumns(table);
-            applyPodColumnLayout(table);
-            if (data) {
-                updateTableWithMetrics(table, data);
-                if (!sortState.key && !nativeSortActive && !isGroupedPodTable(table)) {
-                    sortState.key = 'memoryUsage';
-                    sortState.asc = false;
-                }
-                if (sortState.key) {
-                    sortRowsByMetric(table, sortState.key, sortState.asc, data.metrics);
-                }
-                enableMetricSorting(table);
-            }
-            enhanceNodeDetailPodTable(table);
-        });
+        if (!data || window.location.href !== routeHref) return;
+        tables.forEach((table) => queuePodTableRefresh(table, routeHref));
     }
 
     async function processNodesPage() {
+        const routeHref = window.location.href;
         const tables = findNodeTables();
         if (!tables.length) return;
 
         const summary = await fetchNodeResourceSummary();
-        if (!summary) return;
+        if (!summary || window.location.href !== routeHref) return;
         tables.forEach((table) => {
+            if (!table.isConnected || window.location.href !== routeHref || !isNodeTable(table)) return;
             updateNodeTableWithResources(table, summary);
         });
     }
@@ -2873,6 +3202,17 @@
         }
 
         observer = new MutationObserver((mutations) => {
+            // Do not mutate Vue-owned table DOM inside MutationObserver. Queue
+            // work until Vue's next tick and the frame boundary, then verify
+            // that both the route and table are still current.
+            const changedTables = new Set();
+            mutations.forEach((mutation) => {
+                mutation.addedNodes.forEach((node) => {
+                    collectTablesFromNode(node, changedTables);
+                });
+            });
+            changedTables.forEach((table) => queuePodTableRefresh(table));
+
             if (Date.now() < suppressMutationsUntil) return;
             if (isProcessing) return;
             for (let mutation of mutations) {
@@ -2894,15 +3234,14 @@
         rememberDirectEditReferrer();
         ensureResourceEditRouterGuard();
         injectStyles();
+        observeChanges();
 
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', () => {
                 scheduleProcess(100);
-                observeChanges();
             });
         } else {
             scheduleProcess(100);
-            observeChanges();
         }
 
         window.addEventListener('popstate', () => {
