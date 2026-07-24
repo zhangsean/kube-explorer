@@ -43,7 +43,34 @@
     const pendingPodTableRefreshes = new Map();
     let podTableRefreshScheduled = false;
     const RESOURCE_EDIT_RETURN_KEY = 'kubeExplorer.resourceEditReturnUrl';
+    const WORKLOAD_RESOURCE_TYPES = new Set([
+        'apps.daemonset',
+        'apps.deployment',
+        'apps.replicaset',
+        'apps.statefulset',
+        'batch.job',
+        'replicationcontroller'
+    ]);
     let resourceReturnInProgress = false;
+
+    function getCookieValue(name) {
+        const prefix = `${encodeURIComponent(name)}=`;
+        const item = (document.cookie || '').split(';').map((part) => part.trim()).find((part) => part.startsWith(prefix));
+        if (!item) return '';
+
+        try {
+            return decodeURIComponent(item.slice(prefix.length));
+        } catch (e) {
+            return item.slice(prefix.length);
+        }
+    }
+
+    function getAPIHeaders() {
+        const headers = { 'Accept': 'application/json' };
+        const csrf = getCookieValue('CSRF');
+        if (csrf) headers['x-api-csrf'] = csrf;
+        return headers;
+    }
 
     function parseDashboardUrl(value) {
         try {
@@ -280,7 +307,7 @@
                 flex: 0 0 82px;
                 height: 14px;
                 background-color: #c7ccd8;
-                border-radius: 3px;
+                border-radius: 999px;
                 overflow: hidden;
                 position: relative;
                 display: block;
@@ -296,10 +323,15 @@
                 bottom: 0;
                 height: 100%;
                 margin: 0 !important;
-                border-radius: 3px;
+                border-radius: 999px;
                 transition: width 0.3s ease;
                 background: #5f9fd6;
                 transform: none !important;
+            }
+
+            .percentage-bar > .bar,
+            .percentage-bar > .bar > .indicator {
+                border-radius: 999px !important;
             }
 
             .metrics-progress-fill.limit-warning {
@@ -395,7 +427,7 @@
 
             .node-inline-summary {
                 font-size: 12px;
-                line-height: 1.4;
+                line-height: 14px;
                 color: #8a93a3;
                 white-space: nowrap;
                 display: inline-flex;
@@ -426,19 +458,45 @@
             }
 
             .kube-explorer-compact-node-table tbody tr.main-row.has-sub-row > td {
-                padding-top: 7px !important;
-                padding-bottom: 3px !important;
+                padding-top: 1px !important;
+                padding-bottom: 1px !important;
                 vertical-align: middle !important;
             }
 
             .kube-explorer-compact-node-table tbody tr.sub-row > td {
                 padding-top: 0 !important;
-                padding-bottom: 3px !important;
-                line-height: 1.15 !important;
+                padding-bottom: 8px !important;
+                line-height: 14px !important;
+                height: 20px !important;
+            }
+
+            .kube-explorer-compact-node-table tbody tr.sub-row > td > span,
+            .kube-explorer-compact-node-table tbody tr.sub-row .mt-5 {
+                line-height: 14px !important;
+                margin-top: 0 !important;
+            }
+
+            .kube-explorer-compact-node-table tbody tr.sub-row .tag {
+                padding: 2px 5px 1px !important;
+                margin-top: 0 !important;
+                line-height: 13px !important;
+            }
+
+            .kube-explorer-compact-node-table .node-usage-progress {
+                width: 100% !important;
+                max-width: none !important;
+                overflow: visible;
+            }
+
+            .kube-explorer-compact-node-table .node-usage-progress .metrics-progress-bar {
+                width: auto;
+                min-width: 0;
+                flex: 1 1 auto;
             }
 
             .node-usage-progress .metrics-value {
-                min-width: 44px;
+                min-width: 34px;
+                flex: 0 0 auto;
             }
 
             .side-menu {
@@ -655,6 +713,44 @@
         return podLinks.length > 0;
     }
 
+    function findVueComponent(element, componentName) {
+        let node = element;
+        while (node) {
+            let component = node.__vue__ || null;
+            while (component) {
+                if (component.$options && component.$options.name === componentName) return component;
+                component = component.$parent;
+            }
+            node = node.parentElement;
+        }
+        return null;
+    }
+
+    function isWorkloadPodResourceTable(component) {
+        if (!component || !component.schema || component.schema.id !== 'pod' || !Array.isArray(component.rows)) return false;
+
+        let parent = component.$parent;
+        while (parent) {
+            const value = parent.value;
+            if (value && WORKLOAD_RESOURCE_TYPES.has(value.type) && Array.isArray(value.pods)) {
+                return component.rows === value.pods || component.rows.every((pod) => value.pods.includes(pod));
+            }
+            parent = parent.$parent;
+        }
+        return false;
+    }
+
+    function ensureWorkloadPodTableIgnoresNamespaceFilter(table) {
+        const resourceTable = findVueComponent(table, 'ResourceTable');
+        if (!isWorkloadPodResourceTable(resourceTable) || resourceTable.ignoreFilter) return false;
+
+        // The workload has already selected its own Pods. Applying the global
+        // namespace filter again hides system-namespace Pods on a directly
+        // opened Deployment/DaemonSet/StatefulSet/Job detail page.
+        resourceTable.ignoreFilter = true;
+        return true;
+    }
+
     function findPodTables() {
         const result = [];
         const tables = document.querySelectorAll('table');
@@ -699,9 +795,7 @@
         const resp = await fetch(url, {
             method: 'DELETE',
             credentials: 'same-origin',
-            headers: {
-                'Accept': 'application/json'
-            }
+            headers: getAPIHeaders()
         });
 
         if (!resp.ok && resp.status !== 404) {
@@ -820,6 +914,7 @@
 
     function refreshPodMetricTableFromCache(table) {
         if (!table || !table.isConnected || !isPodTable(table)) return;
+        ensureWorkloadPodTableIgnoresNamespaceFilter(table);
         if (!reconcilePodTransitionRows(table)) return;
         if (lastFetchTime <= 0 && Object.keys(metricsCache).length === 0 && Object.keys(podResourcesCache).length === 0) return;
 
@@ -1273,7 +1368,7 @@
 
         const downloadYAML = async () => {
             const url = `/v1/pods/${encodeURIComponent(ref.namespace)}/${encodeURIComponent(ref.name)}`;
-            const resp = await fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
+            const resp = await fetch(url, { credentials: 'same-origin', headers: getAPIHeaders() });
             if (!resp.ok) throw new Error(`download failed: ${resp.status}`);
             const data = await resp.json();
             const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/yaml;charset=utf-8' });
@@ -1883,7 +1978,7 @@
         for (const url of candidates) {
             try {
                 const resp = await fetch(url, {
-                    headers: { 'Accept': 'application/json' },
+                    headers: getAPIHeaders(),
                     credentials: 'same-origin'
                 });
                 if (!resp.ok) {

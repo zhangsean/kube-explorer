@@ -45,7 +45,7 @@ func optimizeListRequests(next http.Handler) http.Handler {
 		next.ServeHTTP(recorder, req)
 		recorder.writeTo(rw)
 
-		if recorder.statusCode() == http.StatusOK {
+		if recorder.statusCode() == http.StatusOK && isJSONResponse(recorder.header) {
 			setCachedListResponse(key, cachedListResponse{
 				status: recorder.statusCode(),
 				header: cloneHeader(recorder.header),
@@ -54,6 +54,10 @@ func optimizeListRequests(next http.Handler) http.Handler {
 			})
 		}
 	})
+}
+
+func isJSONResponse(header http.Header) bool {
+	return strings.Contains(strings.ToLower(header.Get("Content-Type")), "application/json")
 }
 
 func shouldLoadCompleteList(req *http.Request) bool {

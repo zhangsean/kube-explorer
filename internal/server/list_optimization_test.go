@@ -97,3 +97,46 @@ func TestOptimizeListRequestsCachesExpensiveLists(t *testing.T) {
 		cachedListResponses.Unlock()
 	})
 }
+
+func TestOptimizeListRequestsDoesNotCacheHTML(t *testing.T) {
+	cachedListResponses.Lock()
+	cachedListResponses.items = map[string]cachedListResponse{}
+	cachedListResponses.Unlock()
+
+	calls := 0
+	handler := optimizeListRequests(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		calls++
+		if calls == 1 {
+			rw.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = io.WriteString(rw, `<!doctype html><title>API browser</title>`)
+			return
+		}
+
+		rw.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(rw, `{"data":[{"id":"pod-1"}]}`)
+	}))
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/v1/pods?exclude=metadata.managedFields", nil))
+	if got := first.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("first response content type = %q, want HTML", got)
+	}
+
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/v1/pods?exclude=metadata.managedFields", nil))
+	if got := second.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("second response content type = %q, want JSON", got)
+	}
+	if got := second.Header().Get("X-Kube-Explorer-Cache"); got != "" {
+		t.Fatalf("second response cache header = %q, want empty", got)
+	}
+	if calls != 2 {
+		t.Fatalf("downstream calls = %d, want 2", calls)
+	}
+
+	t.Cleanup(func() {
+		cachedListResponses.Lock()
+		cachedListResponses.items = map[string]cachedListResponse{}
+		cachedListResponses.Unlock()
+	})
+}

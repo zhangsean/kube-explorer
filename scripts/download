@@ -15,6 +15,55 @@ rm -rf internal/ui/ui/*
 mkdir -p internal/ui/ui/dashboard 
 cd internal/ui/ui/dashboard || exit 1;
 curl -sL https://pandaria-dashboard-ui.s3.ap-southeast-2.amazonaws.com/release-2.9-cn/kube-explorer-ui/${CATTLE_DASHBOARD_UI_VERSION}.tar.gz | $TAR_CMD xvzf - --strip-components=2
+# Rancher Dashboard emits prefetch tags for every lazy chunk. That makes the
+# browser download nearly the entire UI bundle on the first page. Keep the
+# chunks lazy and retain only the build-generated preload tags for entry files.
+sed -E 's#<link href="[^"]+" rel="prefetch">##g' index.html > index.html.no-prefetch
+mv index.html.no-prefetch index.html
+
+# This is the standalone kube-explorer build: it has neither Rancher's Norman
+# /v3 authentication API nor the Rancher Monitoring Grafana integration. Mark
+# it before the Dashboard entry runs, then short-circuit those generic Rancher
+# capability probes. The Service-cache guard remains as a safe fallback when
+# this bundle is reused without the standalone marker.
+DASHBOARD_ENTRIES=(js/index.*.js)
+if [[ ${#DASHBOARD_ENTRIES[@]} -ne 1 || ! -f "${DASHBOARD_ENTRIES[0]}" ]]; then
+    echo "Expected exactly one Dashboard entry bundle, found ${#DASHBOARD_ENTRIES[@]}" >&2
+    exit 1
+fi
+DASHBOARD_ENTRY=${DASHBOARD_ENTRIES[0]}
+node - "$DASHBOARD_ENTRY" <<'NODE'
+const fs = require('fs');
+const file = process.argv[2];
+const source = fs.readFileSync(file, 'utf8');
+const before = 'case 0:if(c=b.length>4&&void 0!==b[4]?b[4]:"cluster",l=b.length>5&&void 0!==b[5]?b[5]:null,Object(i["e"])(n.getters)){';
+const after = 'case 0:if(c=b.length>4&&void 0!==b[4]?b[4]:"cluster",l=b.length>5&&void 0!==b[5]?b[5]:null,window.__KUBE_EXPLORER_STANDALONE__)return e.abrupt("return",!1);if(n.getters["".concat(c,"/haveAll")]("service")&&!n.getters["".concat(c,"/all")]("service").some((function(e){var t=l?"cattle-project-".concat(l,"-monitoring"):"cattle-monitoring-system",n=l?"cattle-project-".concat(l,"-monitoring-grafana"):"rancher-monitoring-grafana";return e.id==="".concat(t,"/").concat(n)||e.metadata&&e.metadata.namespace===t&&e.metadata.name===n})))return e.abrupt("return",!1);if(Object(i["e"])(n.getters)){';
+const authBefore = 'case 3:if(!1===o.getters["auth/enabled"]||o.getters["auth/loggedIn"]){';
+const authAfter = 'case 3:if(window.__KUBE_EXPLORER_STANDALONE__)return Object(G["g"])(o),o.dispatch("gcStartIntervals"),e.abrupt("return",a());if(!1===o.getters["auth/enabled"]||o.getters["auth/loggedIn"]){';
+const htmlFile = 'index.html';
+const html = fs.readFileSync(htmlFile, 'utf8');
+const entryPattern = /<script src="js\/index\.[^"]+\.js"><\/script>/g;
+const entryMatches = html.match(entryPattern) || [];
+const probeMatches = source.split(before).length - 1;
+const authMatches = source.split(authBefore).length - 1;
+const fleetBefore = 'this.canViewAgents=this.$store.getters["cluster/canList"](p["hb"].DEPLOYMENT)&&this.$store.getters["cluster/canList"](p["hb"].STATEFUL_SET),this.canViewAgents&&this.loadAgents()';
+const fleetAfter = 'this.canViewAgents=!window.__KUBE_EXPLORER_STANDALONE__&&this.$store.getters["cluster/canList"](p["hb"].DEPLOYMENT)&&this.$store.getters["cluster/canList"](p["hb"].STATEFUL_SET),this.canViewAgents&&this.loadAgents()';
+const fleetChunks = fs.readdirSync('js')
+    .filter((name) => /^chunk-.*\.js$/.test(name))
+    .map((name) => ({ file: `js/${name}`, source: fs.readFileSync(`js/${name}`, 'utf8') }))
+    .filter((chunk) => chunk.source.includes(fleetBefore));
+
+if (probeMatches !== 1 || authMatches !== 1 || entryMatches.length !== 1 || fleetChunks.length !== 1) {
+    throw new Error(`Unexpected Dashboard structure: Grafana=${probeMatches}, auth=${authMatches}, entry=${entryMatches.length}, fleet=${fleetChunks.length}`);
+}
+
+const patchedSource = source.replace(before, after).replace(authBefore, authAfter);
+const patchedHtml = html.replace(entryPattern, `<script>window.__KUBE_EXPLORER_STANDALONE__=true</script>${entryMatches[0]}`);
+
+fs.writeFileSync(file, patchedSource);
+fs.writeFileSync(htmlFile, patchedHtml);
+fs.writeFileSync(fleetChunks[0].file, fleetChunks[0].source.replace(fleetBefore, fleetAfter));
+NODE
 cp index.html ../index.html
 
 mkdir ../api-ui
