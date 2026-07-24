@@ -698,6 +698,17 @@
     }
 
     function isPodTable(table) {
+        const resourceTable = findVueComponent(table, 'ResourceTable');
+        const schemaID = normalizeKey(resourceTable && resourceTable.schema && resourceTable.schema.id);
+        if (schemaID) return schemaID === 'pod';
+
+        const path = window.location.pathname || '';
+        const isPodListRoute = /\/explorer\/pod\/?$/i.test(path);
+        const isWorkloadPodsRoute = /\/explorer\/(?:apps\.)?(?:deployment|daemonset|statefulset|replicaset|job|cronjob)\//i.test(path) &&
+            /^#pods(?:$|[/?])/i.test(window.location.hash || '');
+        const isNodePodsRoute = /\/explorer\/node\/[^/?#]+\/?$/i.test(path);
+        if (!isPodListRoute && !isWorkloadPodsRoute && !isNodePodsRoute) return false;
+
         const headerTexts = getTableHeaderTexts(table);
         if (!headerTexts.length) return false;
         const hasName = hasAnyHeader(headerTexts, ['name', '\u540d\u79f0']);
@@ -708,7 +719,9 @@
         // Restrict to pod-style list tables to avoid deployment list pages.
         if (hasName && hasReady && hasRestarts && hasIP && hasNode) return true;
 
-        // Locale-independent fallback: pod list rows include links containing /pod/{ns}/{name}.
+        // Locale-independent fallback, restricted to routes that can contain a
+        // Pod resource table. This prevents Cluster event tables from being
+        // mistaken for Pod lists merely because they link to a Pod.
         const podLinks = table.querySelectorAll('tbody a[href*="/pod/"]');
         return podLinks.length > 0;
     }
@@ -1568,6 +1581,11 @@
     }
 
     function isNodeTable(table) {
+        const resourceTable = findVueComponent(table, 'ResourceTable');
+        const schemaID = normalizeKey(resourceTable && resourceTable.schema && resourceTable.schema.id);
+        if (schemaID) return schemaID === 'node';
+        if (!/\/explorer\/node\/?$/i.test(window.location.pathname || '')) return false;
+
         const headerTexts = getTableHeaderTexts(table);
         if (!headerTexts.length) return false;
         const hasName = hasAnyHeader(headerTexts, ['name', '\u540d\u79f0']);
@@ -2076,7 +2094,55 @@
         ], 'node metrics');
     }
 
+    function getClusterStore() {
+        const app = document.getElementById('app');
+        if (app && app.__vue__ && app.__vue__.$store) return app.__vue__.$store;
+
+        for (const table of document.querySelectorAll('table')) {
+            const resourceTable = findVueComponent(table, 'ResourceTable');
+            if (resourceTable && resourceTable.$store) return resourceTable.$store;
+        }
+        return null;
+    }
+
+    function readClusterStoreCollectionData(types) {
+        const store = getClusterStore();
+        const haveAll = store && store.getters && store.getters['cluster/haveAll'];
+        const all = store && store.getters && store.getters['cluster/all'];
+        if (typeof haveAll !== 'function' || typeof all !== 'function') {
+            return { storeAvailable: false, data: null };
+        }
+
+        for (const type of (Array.isArray(types) ? types : [types])) {
+            try {
+                if (!haveAll(type)) continue;
+                const data = all(type);
+                if (Array.isArray(data)) return { storeAvailable: true, data: { data } };
+            } catch (error) {
+                // A type absent from the current Dashboard schema is expected;
+                // let the existing API fallback handle it.
+            }
+        }
+        return { storeAvailable: true, data: null };
+    }
+
+    async function getClusterStoreCollectionData(types) {
+        const deadline = Date.now() + 1500;
+        let result = readClusterStoreCollectionData(types);
+        while (result.storeAvailable && !result.data && Date.now() < deadline) {
+            // ResourceTable can render just before its Store findAll request
+            // settles. Give that in-flight request a chance to complete so the
+            // fallback does not issue the same collection request in parallel.
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            result = readClusterStoreCollectionData(types);
+        }
+        return result.data;
+    }
+
     async function getPodsData() {
+        const storeData = await getClusterStoreCollectionData('pod');
+        if (storeData) return storeData;
+
         const now = Date.now();
         if (rawPodsCache && now - rawPodsFetchedAt < CACHE_DURATION) {
             return rawPodsCache;
@@ -2097,6 +2163,9 @@
     }
 
     async function getNodesData() {
+        const storeData = await getClusterStoreCollectionData('node');
+        if (storeData) return storeData;
+
         const now = Date.now();
         if (rawNodesCache && now - rawNodesFetchedAt < CACHE_DURATION) {
             return rawNodesCache;
@@ -2117,6 +2186,12 @@
     }
 
     async function getPodMetricsData() {
+        const storeData = await getClusterStoreCollectionData([
+            'metrics.k8s.io.podmetrics',
+            'metrics.k8s.io.podMetric'
+        ]);
+        if (storeData) return storeData;
+
         const now = Date.now();
         if (rawPodMetricsCache && now - rawPodMetricsFetchedAt < CACHE_DURATION) {
             return rawPodMetricsCache;
@@ -2137,6 +2212,12 @@
     }
 
     async function getNodeMetricsData() {
+        const storeData = await getClusterStoreCollectionData([
+            'metrics.k8s.io.nodemetrics',
+            'metrics.k8s.io.nodeMetric'
+        ]);
+        if (storeData) return storeData;
+
         const now = Date.now();
         if (rawNodeMetricsCache && now - rawNodeMetricsFetchedAt < CACHE_DURATION) {
             return rawNodeMetricsCache;

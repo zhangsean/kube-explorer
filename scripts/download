@@ -10,11 +10,21 @@ else
     TAR_CMD="tar"
 fi
 
+CUSTOM_METRICS_SOURCE="internal/ui/ui/dashboard/js/custom-metrics.js"
+if [[ ! -f "$CUSTOM_METRICS_SOURCE" ]]; then
+    echo "Missing custom Dashboard script: $CUSTOM_METRICS_SOURCE" >&2
+    exit 1
+fi
+CUSTOM_METRICS_TMP=$(mktemp)
+trap 'rm -f "$CUSTOM_METRICS_TMP"' EXIT
+cp "$CUSTOM_METRICS_SOURCE" "$CUSTOM_METRICS_TMP"
+
 rm -rf internal/ui/ui/*
 
 mkdir -p internal/ui/ui/dashboard 
 cd internal/ui/ui/dashboard || exit 1;
 curl -sL https://pandaria-dashboard-ui.s3.ap-southeast-2.amazonaws.com/release-2.9-cn/kube-explorer-ui/${CATTLE_DASHBOARD_UI_VERSION}.tar.gz | $TAR_CMD xvzf - --strip-components=2
+cp "$CUSTOM_METRICS_TMP" js/custom-metrics.js
 # Rancher Dashboard emits prefetch tags for every lazy chunk. That makes the
 # browser download nearly the entire UI bundle on the first page. Keep the
 # chunks lazy and retain only the build-generated preload tags for entry files.
@@ -33,6 +43,7 @@ if [[ ${#DASHBOARD_ENTRIES[@]} -ne 1 || ! -f "${DASHBOARD_ENTRIES[0]}" ]]; then
 fi
 DASHBOARD_ENTRY=${DASHBOARD_ENTRIES[0]}
 node - "$DASHBOARD_ENTRY" <<'NODE'
+const crypto = require('crypto');
 const fs = require('fs');
 const file = process.argv[2];
 const source = fs.readFileSync(file, 'utf8');
@@ -42,6 +53,13 @@ const authBefore = 'case 3:if(!1===o.getters["auth/enabled"]||o.getters["auth/lo
 const authAfter = 'case 3:if(window.__KUBE_EXPLORER_STANDALONE__)return Object(G["g"])(o),o.dispatch("gcStartIntervals"),e.abrupt("return",a());if(!1===o.getters["auth/enabled"]||o.getters["auth/loggedIn"]){';
 const htmlFile = 'index.html';
 const html = fs.readFileSync(htmlFile, 'utf8');
+const customMetricsFile = 'js/custom-metrics.js';
+const customMetricsVersion = crypto.createHash('sha256')
+    .update(fs.readFileSync(customMetricsFile))
+    .digest('hex')
+    .slice(0, 12);
+const customMetricsTag = `<script src="${customMetricsFile}?v=${customMetricsVersion}"></script>`;
+const customMetricsPattern = /<script src="js\/custom-metrics\.js(?:\?v=[^"]*)?"><\/script>/g;
 const entryPattern = /<script src="js\/index\.[^"]+\.js"><\/script>/g;
 const entryMatches = html.match(entryPattern) || [];
 const probeMatches = source.split(before).length - 1;
@@ -58,12 +76,17 @@ if (probeMatches !== 1 || authMatches !== 1 || entryMatches.length !== 1 || flee
 }
 
 const patchedSource = source.replace(before, after).replace(authBefore, authAfter);
-const patchedHtml = html.replace(entryPattern, `<script>window.__KUBE_EXPLORER_STANDALONE__=true</script>${entryMatches[0]}`);
+const patchedHtml = html
+    .replace(customMetricsPattern, '')
+    .replace(entryPattern, `<script>window.__KUBE_EXPLORER_STANDALONE__=true</script>${entryMatches[0]}${customMetricsTag}`);
 
 fs.writeFileSync(file, patchedSource);
 fs.writeFileSync(htmlFile, patchedHtml);
 fs.writeFileSync(fleetChunks[0].file, fleetChunks[0].source.replace(fleetBefore, fleetAfter));
 NODE
+# Source maps are development artifacts and account for most of the embedded
+# Dashboard size. They are not requested by normal browser operation.
+find . -type f -name '*.map' -delete
 cp index.html ../index.html
 
 mkdir ../api-ui
