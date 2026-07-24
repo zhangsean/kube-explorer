@@ -449,6 +449,10 @@
                 margin-left: 0;
             }
 
+            .node-inline-summary .pod-block {
+                justify-content: flex-start;
+            }
+
             .node-inline-summary .warning {
                 color: #e53935;
             }
@@ -693,6 +697,63 @@
                 overflow: visible !important;
             }
 
+            .gauges.gauges__pods.kube-explorer-native-pod-gauges {
+                display: none !important;
+            }
+
+            .kube-explorer-pod-state-gauges {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: stretch;
+                gap: 8px;
+                margin: 0 0 20px;
+                max-width: 100%;
+            }
+
+            .kube-explorer-pod-state-gauge {
+                box-sizing: border-box;
+                display: flex;
+                flex: 0 0 142px;
+                align-items: center;
+                width: 142px;
+                min-width: 142px;
+                height: 68px;
+                padding: 8px 12px 8px 14px;
+                border-radius: 6px;
+                overflow: hidden;
+            }
+
+            .kube-explorer-pod-state-gauge .pod-state-gauge-data {
+                min-width: 0;
+            }
+
+            .kube-explorer-pod-state-gauge .pod-state-gauge-count {
+                display: block;
+                margin: 0 0 2px;
+                color: var(--body-text);
+                font-size: 30px;
+                font-weight: 500;
+                line-height: 32px;
+            }
+
+            .kube-explorer-pod-state-gauge .pod-state-gauge-label {
+                display: block;
+                overflow: hidden;
+                color: var(--body-text);
+                font-size: 14px;
+                line-height: 18px;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
+            @media (max-width: 760px) {
+                .kube-explorer-pod-state-gauge {
+                    flex-basis: 124px;
+                    width: 124px;
+                    min-width: 124px;
+                }
+            }
+
         `;
         document.head.appendChild(style);
     }
@@ -737,6 +798,102 @@
             node = node.parentElement;
         }
         return null;
+    }
+
+    function findWorkloadForPodGauges(element) {
+        const seen = new Set();
+        let node = element;
+        while (node) {
+            let component = node.__vue__ || null;
+            while (component && !seen.has(component)) {
+                seen.add(component);
+                const value = component.value;
+                if (value && Array.isArray(value.pods)) return value;
+                component = component.$parent;
+            }
+            node = node.parentElement;
+        }
+        return null;
+    }
+
+    function podGaugeTone(stateColor) {
+        const tone = normalizeKey(stateColor).replace(/^text-/, '').replace(/^bg-/, '');
+        return new Set(['success', 'info', 'warning', 'error']).has(tone) ? tone : 'info';
+    }
+
+    function podStateGaugeGroups(pods) {
+        const groups = new Map();
+        pods.forEach((pod) => {
+            const label = String(
+                (pod && pod.stateDisplay) ||
+                (pod && pod.status && pod.status.phase) ||
+                (pod && pod.state) ||
+                '-'
+            );
+            const tone = podGaugeTone(pod && pod.stateColor);
+            const key = `${label}\u0000${tone}`;
+            const existing = groups.get(key);
+            if (existing) {
+                existing.count += 1;
+            } else {
+                groups.set(key, { label, tone, count: 1 });
+            }
+        });
+        return Array.from(groups.values());
+    }
+
+    function renderCompactPodStateGauges(container, groups) {
+        const signature = groups.map((group) => `${group.label}:${group.tone}:${group.count}`).join('|');
+        if (container.dataset.gaugeSignature === signature) return;
+        container.dataset.gaugeSignature = signature;
+        container.textContent = '';
+
+        groups.forEach((group) => {
+            const item = document.createElement('div');
+            item.className = 'kube-explorer-pod-state-gauge';
+            item.setAttribute('role', 'listitem');
+            item.setAttribute('aria-label', `${group.label}: ${group.count}`);
+            item.style.background = `transparent linear-gradient(94deg, rgba(var(--sizzle-${group.tone}), 0.22) 0%, rgba(var(--sizzle-${group.tone}), 0.10) 100%) 0% 0% no-repeat padding-box`;
+            item.style.borderLeft = `6px solid rgba(var(--sizzle-${group.tone}), 1)`;
+
+            const data = document.createElement('div');
+            data.className = 'pod-state-gauge-data';
+            const count = document.createElement('span');
+            count.className = 'pod-state-gauge-count';
+            count.textContent = String(group.count);
+            const label = document.createElement('span');
+            label.className = 'pod-state-gauge-label';
+            label.textContent = group.label;
+            data.appendChild(count);
+            data.appendChild(label);
+            item.appendChild(data);
+            container.appendChild(item);
+        });
+    }
+
+    function enhanceWorkloadPodStateGauges() {
+        document.querySelectorAll('.gauges.gauges__pods').forEach((nativeGauges) => {
+            const workload = findWorkloadForPodGauges(nativeGauges);
+            const pods = workload && Array.isArray(workload.pods) ? workload.pods : [];
+            let compact = nativeGauges.parentElement &&
+                nativeGauges.parentElement.querySelector('.kube-explorer-pod-state-gauges');
+
+            if (!pods.length) {
+                nativeGauges.classList.remove('kube-explorer-native-pod-gauges');
+                if (compact) compact.remove();
+                return;
+            }
+
+            if (!compact) {
+                compact = document.createElement('div');
+                compact.className = 'kube-explorer-pod-state-gauges';
+                compact.setAttribute('role', 'list');
+                compact.setAttribute('aria-label', isEnglishLocale() ? 'Pods by state and color' : '\u6309\u72b6\u6001\u548c\u989c\u8272\u5212\u5206\u7684 Pod');
+                nativeGauges.insertAdjacentElement('afterend', compact);
+            }
+            nativeGauges.classList.add('kube-explorer-native-pod-gauges');
+            renderCompactPodStateGauges(compact, podStateGaugeGroups(pods));
+        });
     }
 
     function isWorkloadPodResourceTable(component) {
@@ -945,6 +1102,7 @@
         applyPodColumnLayout(table);
         updateTableWithMetrics(table, { metrics: metricsCache, resources: podResourcesCache });
         enableMetricSorting(table);
+        restartSortableLiveColumns(findSortableTableComponent(table));
     }
 
     function isPodGroupRow(row) {
@@ -2242,9 +2400,11 @@
         const capacity = (node && node.status && node.status.capacity) || {};
         const cpuRaw = allocatable.cpu || capacity.cpu || 0;
         const memoryRaw = allocatable.memory || capacity.memory || 0;
+        const podTotal = parseInt(allocatable.pods || capacity.pods || 0, 10);
         return {
             cpuMilli: parseCPUValue(cpuRaw),
-            memoryMi: parseMemoryValue(memoryRaw)
+            memoryMi: parseMemoryValue(memoryRaw),
+            podTotal: isFinite(podTotal) ? podTotal : 0
         };
     }
 
@@ -2277,7 +2437,9 @@
                     memoryRequest: 0,
                     memoryLimit: 0,
                     cpuUsage: 0,
-                    memoryUsage: 0
+                    memoryUsage: 0,
+                    podUsed: 0,
+                    podTotal: cap.podTotal
                 };
             });
 
@@ -2299,6 +2461,10 @@
                 summary[nodeName].cpuLimit += resources.cpu.limit;
                 summary[nodeName].memoryRequest += resources.memory.request;
                 summary[nodeName].memoryLimit += resources.memory.limit;
+                const phase = normalizeKey(pod && pod.status && pod.status.phase);
+                if (phase !== 'succeeded' && phase !== 'failed') {
+                    summary[nodeName].podUsed += 1;
+                }
             });
 
             nodeResourceSummaryCache = summary;
@@ -2563,6 +2729,29 @@
         }).join('|');
     }
 
+    function restartSortableLiveColumns(sortable) {
+        if (!sortable || typeof sortable.updateLiveColumns !== 'function' ||
+            typeof sortable.$nextTick !== 'function') return;
+
+        sortable.$nextTick(() => {
+            if (sortable._isDestroyed || sortable._isBeingDestroyed) return;
+            if (sortable.__kubeExplorerLiveColumnsFrame) {
+                cancelAnimationFrame(sortable.__kubeExplorerLiveColumnsFrame);
+            }
+            sortable.__kubeExplorerLiveColumnsFrame = requestAnimationFrame(() => {
+                sortable.__kubeExplorerLiveColumnsFrame = null;
+                if (sortable._isDestroyed || sortable._isBeingDestroyed) return;
+
+                // SortableTable chooses its timer interval from the currently
+                // visible LiveDate cells. After a rolling update, its existing
+                // timer can still reflect only the old Pods (minutes or hours),
+                // leaving the new Pod frozen at "Just now" or "1 sec". Force
+                // an immediate recalculation after Vue has mounted the new row.
+                sortable.updateLiveColumns();
+            });
+        });
+    }
+
     function refreshSortableRenderedMetrics(sortable, table, expectedHref = window.location.href) {
         if (!sortable || typeof sortable.$nextTick !== 'function') return;
         sortable.$nextTick(() => {
@@ -2575,6 +2764,7 @@
             applyPodColumnLayout(liveTable);
             updateTableWithMetrics(liveTable, { metrics: metricsCache, resources: podResourcesCache });
             enableMetricSorting(liveTable);
+            restartSortableLiveColumns(sortable);
         });
     }
 
@@ -2586,13 +2776,15 @@
         sortable.__kubeExplorerMetricRowsUnwatch = sortable.$watch(
             () => sortableRowsSignature(sortable),
             (currentSignature, previousSignature) => {
-                if (currentSignature === previousSignature || !sortable.__kubeExplorerMetricSort) return;
+                if (currentSignature === previousSignature) return;
 
                 // Dashboard may mutate the workload Pod array in place during
-                // a rolling update. Explicitly invalidate the whole table
-                // chain in the same tick so a newly-created Pod cannot wait
-                // for the next 15-second metrics refresh before appearing.
-                invalidateSortableComputedRows(sortable);
+                // a rolling update. Explicitly invalidate the whole table chain
+                // when metric sorting is active so the new Pod appears now. The
+                // refresh also restarts LiveDate even after native column sorts.
+                if (sortable.__kubeExplorerMetricSort) {
+                    invalidateSortableComputedRows(sortable);
+                }
                 refreshSortableRenderedMetrics(
                     sortable,
                     sortable.__kubeExplorerMetricTable,
@@ -3200,7 +3392,8 @@
             container.className = 'node-inline-summary';
             container.innerHTML = [
                 '<span class="metric-block cpu-block"><span class="cpu-req"></span><span class="cpu-lim"></span><span class="cpu-all"></span></span>',
-                '<span class="metric-block ram-block"><span class="mem-req"></span><span class="mem-lim"></span><span class="mem-all"></span></span>'
+                '<span class="metric-block ram-block"><span class="mem-req"></span><span class="mem-lim"></span><span class="mem-all"></span></span>',
+                '<span class="metric-block pod-block"><span class="pod-count"></span></span>'
             ].join('');
             hostCell.appendChild(container);
         }
@@ -3211,21 +3404,31 @@
         const headers = headerRow ? headerRow.querySelectorAll('th') : null;
         const cpuHeader = headers && typeof headerIndexes.cpu === 'number' ? headers[headerIndexes.cpu] : null;
         const ramHeader = headers && typeof headerIndexes.ram === 'number' ? headers[headerIndexes.ram] : null;
+        const podHeader = headers && typeof headerIndexes.pods === 'number' ? headers[headerIndexes.pods] : null;
         if (cpuHeader && ramHeader) {
             const hostRect = hostCell.getBoundingClientRect();
             const cpuRect = cpuHeader.getBoundingClientRect();
             const ramRect = ramHeader.getBoundingClientRect();
+            const podRect = podHeader ? podHeader.getBoundingClientRect() : null;
+            const podVisible = !!(podHeader && podRect && podRect.width > 0 &&
+                getComputedStyle(podHeader).display !== 'none');
             const cpuLeft = Math.max(8, Math.round(cpuRect.left - hostRect.left));
             const cpuWidth = Math.max(150, Math.round(cpuRect.width));
             const ramWidth = Math.max(150, Math.round(ramRect.width));
             const gap = Math.max(6, Math.round(ramRect.left - cpuRect.left - cpuWidth));
+            const podWidth = podVisible ? Math.max(96, Math.round(podRect.width)) : 96;
+            const podGap = podVisible ? Math.max(6, Math.round(podRect.left - ramRect.left - ramWidth)) : 6;
             const cpuBlock = container.querySelector('.cpu-block');
             const ramBlock = container.querySelector('.ram-block');
+            const podBlock = container.querySelector('.pod-block');
             const layoutSig = [
                 cpuLeft,
                 cpuWidth,
                 ramWidth,
-                gap
+                gap,
+                podVisible ? 1 : 0,
+                podWidth,
+                podGap
             ].join('|');
             if (container.dataset.layoutSig !== layoutSig) {
                 container.dataset.layoutSig = layoutSig;
@@ -3234,6 +3437,9 @@
                 if (cpuBlock) cpuBlock.style.minWidth = `${cpuWidth}px`;
                 if (ramBlock) ramBlock.style.minWidth = `${ramWidth}px`;
                 if (ramBlock) ramBlock.style.marginLeft = `${gap}px`;
+                if (podBlock) podBlock.style.display = podVisible ? 'inline-flex' : 'none';
+                if (podBlock) podBlock.style.minWidth = `${podWidth}px`;
+                if (podBlock) podBlock.style.marginLeft = `${podGap}px`;
             }
         }
 
@@ -3251,6 +3457,8 @@
         const memReq = container.querySelector('.mem-req');
         const memLim = container.querySelector('.mem-lim');
         const memAll = container.querySelector('.mem-all');
+        const podBlock = container.querySelector('.pod-block');
+        const podCount = container.querySelector('.pod-count');
 
         const summarySig = [
             cpuReqPct.toFixed(3),
@@ -3258,7 +3466,9 @@
             memReqPct.toFixed(3),
             memLimPct.toFixed(3),
             cpuTotalLabel,
-            memTotalLabel
+            memTotalLabel,
+            summary.podUsed,
+            summary.podTotal
         ].join('|');
         if (container.dataset.summarySig === summarySig) {
             return;
@@ -3271,6 +3481,12 @@
         if (memReq) memReq.textContent = `Req ${formatPercent(memReqPct)}`;
         if (memLim) memLim.textContent = `Lim ${formatPercent(memLimPct)}`;
         if (memAll) memAll.textContent = `All ${memTotalLabel}`;
+        if (podCount) podCount.textContent = `Pods ${summary.podUsed} / ${summary.podTotal}`;
+        if (podBlock) {
+            const podUsageLabel = `Pods ${summary.podUsed} / ${summary.podTotal}`;
+            podBlock.setAttribute('aria-label', podUsageLabel);
+            podBlock.setAttribute('title', podUsageLabel);
+        }
 
         setWarnClass(cpuReq, cpuReqPct > 90);
         setWarnClass(cpuLim, cpuLimPct > 90);
@@ -3283,8 +3499,9 @@
         const headerIndexes = getNodeHeaderIndexes(table);
         const cpuIndex = typeof headerIndexes.cpu === 'number' ? headerIndexes.cpu : -1;
         const ramIndex = typeof headerIndexes.ram === 'number' ? headerIndexes.ram : -1;
+        const podsIndex = typeof headerIndexes.pods === 'number' ? headerIndexes.pods : -1;
         const nameIndex = typeof headerIndexes.name === 'number' ? headerIndexes.name : 1;
-        if (cpuIndex < 0 && ramIndex < 0) return;
+        if (cpuIndex < 0 && ramIndex < 0 && podsIndex < 0) return;
         applyNodeColumnLayout(table, headerIndexes);
 
         const tbody = table.querySelector('tbody');
@@ -3346,6 +3563,7 @@
         lastProcessStartedAt = Date.now();
         suppressMutationsUntil = lastProcessStartedAt + 800;
         try {
+            enhanceWorkloadPodStateGauges();
             processNodeDetailPodEnhancements();
             await processPodsPage();
             await processNodesPage();

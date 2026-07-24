@@ -4,9 +4,43 @@ kube-explorer is a portable explorer for Kubernetes without any dependency.
 
 It integrates the Rancher steve framework and its dashboard, and is recompiled, packaged, compressed, and provides an almost completely stateless Kubernetes resource manager.
 
+## Changelog
+
+每次发布新版本前必须更新本节，按版本倒序记录面向用户的主要变动。
+
+### v0.5.7 - 2026-07-25
+
+- 修复 Deployment、DaemonSet、StatefulSet 等工作负载详情页可能因全局命名空间筛选而不显示 Pod 的问题。
+- 优化独立部署模式的前端请求，移除无用的 Rancher `/v3`、Grafana、Fleet 探测和大量预取请求，并复用 Dashboard Store 中已有的资源与指标数据。
+- 删除发布包中无需运行时加载的 source map，降低嵌入资源体积；下载脚本会保留定制脚本并自动生成缓存版本号。
+- 优化节点列表密度、标签间距和 CPU/RAM/Pod 圆角进度条，新增 `Pods 已使用 / 可分配总量` 展示。
+- 修复滚动更新或 Redeploy 后新 Pod 存活时间停在 1 秒的问题，并保持原生列排序下连续读秒。
+- Deployment 的 Pod 状态统计改为按“状态名称 + 状态颜色”独立分组，并使用紧凑状态块展示。
+- 改进 Pod 指标列刷新和排序稳定性，减少 Vue 表格更新时的闪烁、错位与重复请求。
+
+### v0.5.6 - 2026-07-24
+
+- 优化 Pod、Deployment、ReplicaSet 等列表请求，完整加载分页资源并对高频列表增加短时缓存。
+- 重构 Pod 指标表刷新与排序逻辑，改善滚动更新、路由切换和表格替换时的显示稳定性。
+- 节点 CPU/RAM 使用率改为读取 Metrics API，并补充 Request、Limit、总容量摘要。
+- 增加列表优化测试，覆盖完整列表、分页请求和缓存行为。
+
+### v0.5.5 - 2026-07-23
+
+- 优化资源编辑完成后的返回路径，保留用户进入编辑器前的来源页面。
+- 修复创建中 Pod 的指标列错位问题。
+- 调整发布构建链路，确保使用仓库中已提交的定制 Dashboard 资源。
+- 修正 Docker Hub 与阿里云镜像仓库路径，支持 amd64/arm64 构建并提供独立 ARM 标签。
+
+### v0.5.4 - 2026-06-08
+
+- 增加 Docker Hub 多架构镜像构建，并支持 amd64、arm64 独立发布标签。
+- 发布 Linux 压缩二进制文件并精简容器运行时镜像。
+- 优化 Pod 指标列表的刷新、缓存和渲染。
+
 ## Usage ✅
 
-Please download the binary from the [release page](https://github.com/cnrancher/kube-explorer/releases).
+Please download the binary from the [release page](https://github.com/zhangsean/kube-explorer/releases).
 
 To run an HTTP only server:
 
