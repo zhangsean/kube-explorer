@@ -56,343 +56,11 @@
         'replicationcontroller'
     ]);
     let resourceReturnInProgress = false;
-    const PRIORITY_LIST_FILTER_HEADER = 'X-Kube-Explorer-List-Filter-Keyword';
-    const PRIORITY_LIST_REQUEST_PATHS = new Set([
-        '/v1/apps.deployments',
-        '/v1/apps.replicasets',
-        '/v1/pods'
-    ]);
     const DEPLOYMENT_DETAIL_WRITE_METHODS = new Set(['PUT', 'PATCH']);
-    const PRIORITY_LIST_REQUEST_MAX_WAIT = 2000;
-    const PRIORITY_LIST_INPUT_GRACE = 350;
-    const PRIORITY_LIST_INPUT_SETTLE = 200;
-    const pendingPriorityListRequests = new Set();
-    const activePriorityListRequests = new Map();
-    const boundPriorityListInputs = new WeakSet();
-    let priorityListInputFlushTimer = null;
-    let priorityListReloadTimer = null;
-    let priorityListReloadInProgress = false;
-    let priorityListReloadRequested = false;
-    let priorityListLoadedKeyword = null;
-    let priorityListActiveKeyword = null;
-    let priorityListRequestKeywordOverride = null;
-    let priorityRelatedRestorePromise = null;
+    let priorityListControls = null;
     let deploymentDetailRecoveryTimer = null;
     let deploymentDetailRecoveryTarget = null;
     let deploymentDetailRecoveryInProgress = false;
-
-    function isDeploymentListPage(value) {
-        return getListedResource(value || window.location.href) === 'apps.deployment';
-    }
-
-    function findPriorityListFilterInput() {
-        if (!isDeploymentListPage()) return null;
-        return document.querySelector(
-            '[data-testid="search-box-filter-row"] input[type="search"], .fixed-header-actions input[type="search"]'
-        );
-    }
-
-    function getPriorityListFilterKeyword() {
-        const input = findPriorityListFilterInput();
-        let keyword = '';
-        if (input) {
-            keyword = input.value || '';
-        } else {
-            const url = parseDashboardUrl(window.location.href);
-            keyword = url ? url.searchParams.get('q') || '' : '';
-        }
-        keyword = keyword.trim();
-        return /^[A-Za-z0-9._:/@-]{1,128}$/.test(keyword) ? keyword : '';
-    }
-
-    function sendPendingPriorityListRequest(entry) {
-        if (!entry || entry.sent) return;
-        entry.sent = true;
-        clearTimeout(entry.maxWaitTimer);
-        pendingPriorityListRequests.delete(entry);
-        entry.xhr.__kubeExplorerPendingPriorityListRequest = null;
-        if (entry.xhr.readyState !== window.XMLHttpRequest.OPENED) return;
-
-        sendPriorityListRequest(entry.xhr, entry.originalSend, entry.sendArgs);
-    }
-
-    function finishPriorityListRequest(xhr, entry) {
-        if (activePriorityListRequests.get(xhr) !== entry) return;
-        activePriorityListRequests.delete(xhr);
-        if (activePriorityListRequests.size) return;
-        if (priorityListReloadInProgress) return;
-
-        priorityListLoadedKeyword = priorityListActiveKeyword;
-        priorityListActiveKeyword = null;
-        if (priorityListReloadRequested && getPriorityListFilterKeyword() !== priorityListLoadedKeyword) {
-            schedulePriorityListReload(0);
-        } else {
-            priorityListReloadRequested = false;
-            const loadedKeyword = priorityListLoadedKeyword;
-            restoreCompletePriorityRelatedLists(getClusterStore(), loadedKeyword);
-            refreshPriorityListDelayedColumns().finally(() => {
-                if (!priorityListReloadRequested && getPriorityListFilterKeyword() === loadedKeyword) {
-                    setPriorityListLoading(false);
-                }
-            });
-        }
-    }
-
-    function sendPriorityListRequest(xhr, originalSend, sendArgs) {
-        const keyword = priorityListRequestKeywordOverride === null
-            ? getPriorityListFilterKeyword()
-            : priorityListRequestKeywordOverride;
-        xhr.setRequestHeader(PRIORITY_LIST_FILTER_HEADER, keyword);
-        if (priorityListRequestKeywordOverride !== null) {
-            return originalSend.apply(xhr, sendArgs);
-        }
-
-        const entry = { keyword };
-        if (!activePriorityListRequests.size) {
-            priorityListActiveKeyword = keyword;
-        } else if (priorityListActiveKeyword !== keyword) {
-            priorityListActiveKeyword = null;
-        }
-        activePriorityListRequests.set(xhr, entry);
-        xhr.addEventListener('loadend', () => finishPriorityListRequest(xhr, entry), { once: true });
-        return originalSend.apply(xhr, sendArgs);
-    }
-
-    function flushPendingPriorityListRequests() {
-        clearTimeout(priorityListInputFlushTimer);
-        priorityListInputFlushTimer = null;
-        Array.from(pendingPriorityListRequests).forEach(sendPendingPriorityListRequest);
-    }
-
-    function schedulePendingPriorityListFlush(delay) {
-        if (!pendingPriorityListRequests.size) return;
-        clearTimeout(priorityListInputFlushTimer);
-        priorityListInputFlushTimer = setTimeout(flushPendingPriorityListRequests, delay);
-    }
-
-    async function reloadPriorityLists() {
-        priorityListReloadTimer = null;
-        if (!isDeploymentListPage()) {
-            priorityListReloadRequested = false;
-            priorityListLoadedKeyword = null;
-            setPriorityListLoading(false);
-            return;
-        }
-
-        const keyword = getPriorityListFilterKeyword();
-        if (keyword === priorityListLoadedKeyword) {
-            priorityListReloadRequested = false;
-            setPriorityListLoading(false);
-            return;
-        }
-        if (pendingPriorityListRequests.size || activePriorityListRequests.size || priorityListReloadInProgress || priorityRelatedRestorePromise) {
-            priorityListReloadRequested = true;
-            return;
-        }
-
-        const store = getClusterStore();
-        if (!store || typeof store.dispatch !== 'function') {
-            schedulePriorityListReload(100);
-            return;
-        }
-
-        priorityListReloadInProgress = true;
-        priorityListReloadRequested = false;
-        try {
-            await Promise.all([
-                store.dispatch('cluster/findAll', { type: 'apps.replicaset', opt: { force: true } }),
-                store.dispatch('cluster/findAll', { type: 'pod', opt: { force: true } })
-            ]);
-            if (getPriorityListFilterKeyword() !== keyword) return;
-            await store.dispatch('cluster/findAll', { type: 'apps.deployment', opt: { force: true } });
-            if (!activePriorityListRequests.size) {
-                priorityListLoadedKeyword = keyword;
-                priorityListActiveKeyword = null;
-                restoreCompletePriorityRelatedLists(store, keyword);
-                await refreshPriorityListDelayedColumns();
-                if (getPriorityListFilterKeyword() === keyword) {
-                    setPriorityListLoading(false);
-                }
-            }
-        } catch (error) {
-            setPriorityListLoading(false);
-            console.error('Failed reloading filtered workload resources', error);
-        } finally {
-            priorityListReloadInProgress = false;
-            if (priorityListReloadRequested && getPriorityListFilterKeyword() !== priorityListLoadedKeyword) {
-                schedulePriorityListReload(0);
-            }
-        }
-    }
-
-    function schedulePriorityListReload(delay) {
-        priorityListReloadRequested = true;
-        clearTimeout(priorityListReloadTimer);
-        priorityListReloadTimer = setTimeout(reloadPriorityLists, delay);
-    }
-
-    function restoreCompletePriorityRelatedLists(store, filteredKeyword) {
-        if (!filteredKeyword || priorityRelatedRestorePromise || !store || typeof store.dispatch !== 'function') {
-            return priorityRelatedRestorePromise;
-        }
-
-        const promise = (async () => {
-            priorityListRequestKeywordOverride = '';
-            try {
-                await Promise.all([
-                    store.dispatch('cluster/findAll', { type: 'apps.replicaset', opt: { force: true } }),
-                    store.dispatch('cluster/findAll', { type: 'pod', opt: { force: true } })
-                ]);
-            } catch (error) {
-                console.error('Failed restoring complete workload relations', error);
-            } finally {
-                priorityListRequestKeywordOverride = null;
-            }
-        })();
-        priorityRelatedRestorePromise = promise.finally(() => {
-            priorityRelatedRestorePromise = null;
-            if (priorityListReloadRequested && isDeploymentListPage()) {
-                schedulePriorityListReload(0);
-            }
-        });
-        return priorityRelatedRestorePromise;
-    }
-
-    function setPriorityListLoading(loading) {
-        if (document.body) {
-            document.body.classList.toggle('priority-list-filter-loading', loading);
-        }
-        const input = findPriorityListFilterInput();
-        if (!input) return;
-        let spinner = input.parentElement && input.parentElement.querySelector('.priority-list-filter-spinner');
-        if (!spinner && input.parentElement) {
-            spinner = document.createElement('i');
-            spinner.className = 'initial-load-spinner priority-list-filter-spinner';
-            spinner.setAttribute('aria-hidden', 'true');
-            input.insertAdjacentElement('afterend', spinner);
-        }
-        if (spinner) spinner.hidden = !loading;
-    }
-
-    function findPriorityListSortableTable() {
-        const table = document.querySelector('main table');
-        const root = findVueComponent(table, 'ResourceTable');
-        if (!root) return null;
-
-        const queue = [root];
-        const seen = new Set();
-        while (queue.length) {
-            const component = queue.shift();
-            if (!component || seen.has(component)) continue;
-            seen.add(component);
-            if (component.$options && component.$options.name === 'SortableTable') {
-                return component;
-            }
-            queue.push(...(component.$children || []));
-        }
-        return null;
-    }
-
-    async function refreshPriorityListDelayedColumns() {
-        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        const sortableTable = findPriorityListSortableTable();
-        if (!sortableTable || typeof sortableTable.updateLiveAndDelayed !== 'function') return;
-        sortableTable.updateLiveAndDelayed();
-
-        const deadline = Date.now() + 2000;
-        while (Date.now() < deadline) {
-            const rows = Array.from(document.querySelectorAll('main table tbody tr')).filter((row) => {
-                const rect = row.getBoundingClientRect();
-                return rect.top >= 0 && rect.top <= (window.innerHeight + 100) && row.querySelector('a[href*="/apps.deployment/"]');
-            });
-            if (!rows.length || rows.every((row) => !row.querySelector('.hs-popover__loader, .delayed-loader'))) {
-                return;
-            }
-            await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-    }
-
-    function bindPriorityListFilterInput() {
-        const input = findPriorityListFilterInput();
-        if (!input) return;
-        if (!boundPriorityListInputs.has(input)) {
-            input.addEventListener('input', () => {
-                setPriorityListLoading(true);
-                schedulePendingPriorityListFlush(PRIORITY_LIST_INPUT_SETTLE);
-                schedulePriorityListReload(PRIORITY_LIST_INPUT_SETTLE);
-            });
-            boundPriorityListInputs.add(input);
-        }
-
-        schedulePendingPriorityListFlush(
-            getPriorityListFilterKeyword() ? PRIORITY_LIST_INPUT_SETTLE : PRIORITY_LIST_INPUT_GRACE
-        );
-    }
-
-    function isPriorityListXHR(xhr) {
-        if (!xhr || xhr.__kubeExplorerRequestMethod !== 'GET' || !isDeploymentListPage()) return false;
-        const requestUrl = parseDashboardUrl(xhr.__kubeExplorerRequestUrl);
-        if (!requestUrl || requestUrl.origin !== window.location.origin || !PRIORITY_LIST_REQUEST_PATHS.has(requestUrl.pathname)) {
-            return false;
-        }
-        return !requestUrl.searchParams.get('continue') && requestUrl.searchParams.get('watch') !== 'true';
-    }
-
-    function installPriorityListRequestGate() {
-        const XHR = window.XMLHttpRequest;
-        if (!XHR || XHR.prototype.__kubeExplorerPriorityListGate) return;
-
-        const originalOpen = XHR.prototype.open;
-        const originalSend = XHR.prototype.send;
-        const originalAbort = XHR.prototype.abort;
-
-        XHR.prototype.open = function(method, url) {
-            this.__kubeExplorerRequestMethod = String(method || '').toUpperCase();
-            this.__kubeExplorerRequestUrl = String(url || '');
-            return originalOpen.apply(this, arguments);
-        };
-
-        XHR.prototype.send = function() {
-            watchDeploymentDetailWrite(this);
-            if (!isPriorityListXHR(this)) {
-                return originalSend.apply(this, arguments);
-            }
-
-            const keyword = getPriorityListFilterKeyword();
-            if (keyword) {
-                return sendPriorityListRequest(this, originalSend, Array.from(arguments));
-            }
-
-            const entry = {
-                xhr: this,
-                originalSend,
-                sendArgs: Array.from(arguments),
-                sent: false,
-                maxWaitTimer: null
-            };
-            this.__kubeExplorerPendingPriorityListRequest = entry;
-            pendingPriorityListRequests.add(entry);
-            entry.maxWaitTimer = setTimeout(
-                () => sendPendingPriorityListRequest(entry),
-                PRIORITY_LIST_REQUEST_MAX_WAIT
-            );
-            bindPriorityListFilterInput();
-            return undefined;
-        };
-
-        XHR.prototype.abort = function() {
-            const entry = this.__kubeExplorerPendingPriorityListRequest;
-            if (entry && !entry.sent) {
-                entry.sent = true;
-                clearTimeout(entry.maxWaitTimer);
-                pendingPriorityListRequests.delete(entry);
-                this.__kubeExplorerPendingPriorityListRequest = null;
-            }
-            return originalAbort.apply(this, arguments);
-        };
-
-        XHR.prototype.__kubeExplorerPriorityListGate = true;
-    }
 
     function getCookieValue(name) {
         const prefix = `${encodeURIComponent(name)}=`;
@@ -2338,6 +2006,7 @@
         if (key === 'restarts') return '96px';
         if (key === 'node' || key === 'ip') return '100px';
         if (key === 'cpuUsage' || key === 'memoryUsage') return '150px';
+        if (key === 'image') return '320px';
         if (key === 'age') return '96px';
         return '';
     }
@@ -2352,6 +2021,12 @@
         if (!table) return;
         const headerRow = table.querySelector('thead tr');
         if (!headerRow) return;
+        table.style.setProperty('min-width', '1450px', 'important');
+        const scrollContainer = table.closest('.table-responsive') || table.parentElement;
+        if (scrollContainer) {
+            scrollContainer.style.setProperty('overflow-x', 'auto', 'important');
+            scrollContainer.style.setProperty('overscroll-behavior-x', 'contain');
+        }
         const headers = Array.from(headerRow.querySelectorAll('th'));
         const findIdx = (pred) => headers.findIndex((th) => pred(normalizeHeaderText(th.textContent)));
         const nameIdx = findIdx((t) => t.startsWith('name') || t.includes('\u540d\u79f0'));
@@ -4071,7 +3746,7 @@
         }
 
         observer = new MutationObserver((mutations) => {
-            bindPriorityListFilterInput();
+            if (priorityListControls) priorityListControls.bindFilterInput();
             // Do not mutate Vue-owned table DOM inside MutationObserver. Queue
             // work until Vue's next tick and the frame boundary, then verify
             // that both the route and table are still current.
@@ -4101,7 +3776,16 @@
     }
 
     function init() {
-        installPriorityListRequestGate();
+        priorityListControls = window.KubeExplorerPriorityLists.create({
+            window,
+            document,
+            findVueComponent,
+            getClusterStore,
+            getListedResource,
+            parseDashboardUrl,
+            watchDeploymentDetailWrite
+        });
+        priorityListControls.installRequestGate();
         configureDefaultPodLogRange();
         rememberDirectEditReferrer();
         ensureResourceEditRouterGuard();

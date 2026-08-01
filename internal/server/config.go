@@ -84,6 +84,8 @@ func ToServer(ctx context.Context, c *cli.Config, sqlCache bool) (*server.Server
 	if err != nil {
 		return nil, err
 	}
+	readiness := &serverReadiness{}
+	steveServer.Handler = operationalEndpoints(steveServer.Handler, readiness)
 
 	steveServer.APIServer.CustomAPIUIResponseWriter(apiui.CSS(), apiui.JS(), func() string { return config.APIUIVersion })
 
@@ -110,8 +112,10 @@ func ToServer(ctx context.Context, c *cli.Config, sqlCache bool) (*server.Server
 	if err := waitForRequiredSchemas(ctx, steveServer.SchemaFactory, 90*time.Second); err != nil {
 		return steveServer, err
 	}
+	readiness.ready.Store(true)
+	go runListCacheJanitor(ctx.Done(), 5*time.Second)
 	if auth == nil {
-		prewarmPriorityLists(ctx, priorityListAPIHandler)
+		startPriorityListPrewarm(ctx, priorityListAPIHandler)
 	}
 	return steveServer, nil
 }
@@ -136,8 +140,13 @@ func waitForRequiredSchemas(ctx context.Context, lookup schemaLookup, timeout ti
 		{Version: "v1", Kind: "Namespace"},
 		{Group: "apps", Version: "v1", Kind: "Deployment"},
 	}
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
+	var deadline <-chan time.Time
+	var timer *time.Timer
+	if timeout > 0 {
+		timer = time.NewTimer(timeout)
+		deadline = timer.C
+		defer timer.Stop()
+	}
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -156,7 +165,7 @@ func waitForRequiredSchemas(ctx context.Context, lookup schemaLookup, timeout ti
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-deadline.C:
+		case <-deadline:
 			return fmt.Errorf("timed out waiting for required Kubernetes schemas")
 		case <-ticker.C:
 		}

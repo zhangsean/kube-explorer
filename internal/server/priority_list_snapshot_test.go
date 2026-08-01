@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +15,7 @@ func TestFilterPriorityListSnapshot(t *testing.T) {
 		"count":3,
 		"links":{"self":"http://kube-explorer.local/v1/apps.deployments"},
 		"data":[
-			{"metadata":{"name":"v4-api","namespace":"test"},"spec":{"template":{"spec":{"containers":[{"image":"example/api:v1"}]}}},"links":{"self":"http://kube-explorer.local/v1/apps.deployments/test/v4-api","view":"http://kube-explorer.local/apis/apps/v1/namespaces/test/deployments/v4-api"}},
+			{"metadata":{"name":"v4-api","namespace":"test"},"description":"http://kube-explorer.local must stay literal","spec":{"template":{"spec":{"containers":[{"image":"example/api:v1"}]}}},"links":{"self":"http://kube-explorer.local/v1/apps.deployments/test/v4-api","view":"http://kube-explorer.local/apis/apps/v1/namespaces/test/deployments/v4-api"}},
 			{"metadata":{"name":"worker","namespace":"test"},"spec":{"template":{"spec":{"containers":[{"image":"example/worker:v4"}]}}}},
 			{"metadata":{"name":"other","namespace":"test"},"spec":{"template":{"spec":{"containers":[{"image":"example/other:v1"}]}}}}
 		]
@@ -44,7 +45,8 @@ func TestFilterPriorityListSnapshot(t *testing.T) {
 		Count int               `json:"count"`
 		Links map[string]string `json:"links"`
 		Data  []struct {
-			Metadata struct {
+			Description string `json:"description"`
+			Metadata    struct {
 				Name string `json:"name"`
 			} `json:"metadata"`
 			Links map[string]string `json:"links"`
@@ -67,6 +69,9 @@ func TestFilterPriorityListSnapshot(t *testing.T) {
 	}
 	if got := collection.Data[0].Links["view"]; got != "https://exp-dev.example/apis/apps/v1/namespaces/test/deployments/v4-api" {
 		t.Fatalf("resource view link = %q", got)
+	}
+	if got := collection.Data[0].Description; got != "http://kube-explorer.local must stay literal" {
+		t.Fatalf("unrelated string was rewritten: %q", got)
 	}
 }
 
@@ -91,7 +96,7 @@ func TestServePriorityListSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot.refreshedAt = time.Now()
-	setPriorityListSnapshot(key, snapshot)
+	setPriorityListSnapshot(key, snapshot, priorityListSnapshotGeneration())
 
 	recorder := httptest.NewRecorder()
 	if !servePriorityListSnapshot(recorder, req, http.NotFoundHandler()) {
@@ -125,7 +130,7 @@ func TestServePriorityListSnapshotWithExplicitEmptyKeyword(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	setPriorityListSnapshot(key, snapshot)
+	setPriorityListSnapshot(key, snapshot, priorityListSnapshotGeneration())
 
 	recorder := httptest.NewRecorder()
 	if !servePriorityListSnapshot(recorder, req, http.NotFoundHandler()) {
@@ -162,7 +167,7 @@ func TestServePriorityListSnapshotBypassesDeploymentDetailRequests(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	setPriorityListSnapshot(key, snapshot)
+	setPriorityListSnapshot(key, snapshot, priorityListSnapshotGeneration())
 
 	recorder := httptest.NewRecorder()
 	if servePriorityListSnapshot(recorder, req, http.NotFoundHandler()) {
@@ -173,9 +178,58 @@ func TestServePriorityListSnapshotBypassesDeploymentDetailRequests(t *testing.T)
 	}
 }
 
+func TestServePriorityListSnapshotRejectsExpiredData(t *testing.T) {
+	resetPriorityListSnapshotsForTest()
+	t.Cleanup(resetPriorityListSnapshotsForTest)
+
+	req := httptest.NewRequest(http.MethodGet, "https://exp-dev.example/v1/apps.deployments", nil)
+	req.Header.Set("Referer", "https://exp-dev.example/dashboard/c/local/explorer/apps.deployment")
+	key, _ := priorityListSnapshotKey(req)
+	snapshot, err := preparePriorityListSnapshot(req, cachedListResponse{
+		status: http.StatusOK,
+		header: http.Header{"Content-Type": []string{"application/json"}},
+		body:   []byte(`{"count":1,"data":[{"metadata":{"name":"old"}}]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.refreshedAt = time.Now().Add(-priorityListSnapshotMaxAge - time.Second)
+	setPriorityListSnapshot(key, snapshot, priorityListSnapshotGeneration())
+
+	recorder := httptest.NewRecorder()
+	if servePriorityListSnapshot(recorder, req, http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusServiceUnavailable)
+	})) {
+		t.Fatal("expired snapshot must not be served")
+	}
+}
+
+func TestStartPriorityListPrewarmDoesNotBlock(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	blocked := make(chan struct{})
+	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-blocked
+	})
+
+	returned := make(chan struct{})
+	go func() {
+		startPriorityListPrewarm(ctx, handler)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("prewarm blocked startup")
+	}
+	close(blocked)
+}
+
 func resetPriorityListSnapshotsForTest() {
 	priorityListSnapshots.Lock()
 	defer priorityListSnapshots.Unlock()
-	priorityListSnapshots.items = map[string]priorityListSnapshot{}
+	priorityListSnapshots.items = map[string]priorityListSnapshotEntry{}
 	priorityListSnapshots.refreshing = map[string]bool{}
+	priorityListSnapshots.totalBytes = 0
+	priorityListSnapshots.generation++
 }

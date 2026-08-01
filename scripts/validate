@@ -1,22 +1,51 @@
 #!/bin/bash
-set -e
-source $(dirname $0)/version
+set -eo pipefail
+source "$(dirname "$0")/version"
+set -u
 
 cd "$(dirname $0)/.."
 
-if ! command -v golangci-lint; then
-    echo Running: go fmt
-    echo Skipping validation: no golangci-lint available test -z "$(go fmt ./... | tee /dev/stderr)"
-    exit
+echo "Checking Go formatting"
+go_files=()
+if [ -n "${VALIDATE_BASE_SHA:-}" ]; then
+    while IFS= read -r -d '' file; do
+        [ -f "$file" ] && go_files+=("$file")
+    done < <(git diff --name-only -z --diff-filter=ACMR "$VALIDATE_BASE_SHA"...HEAD -- '*.go')
+else
+    while IFS= read -r -d '' file; do
+        [ -f "$file" ] && go_files+=("$file")
+    done < <({ git diff --name-only -z --diff-filter=ACMR HEAD -- '*.go'; git ls-files -z --others --exclude-standard -- '*.go'; })
+fi
+unformatted=""
+if [ "${#go_files[@]}" -gt 0 ]; then
+    unformatted="$(gofmt -l "${go_files[@]}")"
+fi
+if [ -n "$unformatted" ]; then
+    echo "The following Go files need gofmt:"
+    echo "$unformatted"
+    exit 1
 fi
 
-echo Running: golangci-lint
-golangci-lint run
+if command -v golangci-lint >/dev/null 2>&1; then
+    echo "Running golangci-lint"
+    golangci-lint run
+else
+    echo "golangci-lint unavailable; running go vet"
+    go vet ./...
+fi
 
-echo Tidying up modules
+echo "Running Go tests"
+go test -count=1 ./...
+
+echo "Checking Dashboard JavaScript"
+node --check internal/ui/ui/dashboard/js/custom-metrics.js
+node --check internal/ui/ui/dashboard/js/custom-priority-lists.js
+node --test internal/ui/test/*.test.js
+
+echo "Tidying modules"
 go mod tidy
 
-echo Verifying modules
+echo "Verifying modules"
 go mod verify
 
 dirty_files="$(git status --porcelain --untracked-files=no)"

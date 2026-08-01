@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/rancher/apiserver/pkg/urlbuilder"
 	"k8s.io/apimachinery/pkg/util/proxy"
@@ -30,22 +31,31 @@ func proxyMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		var captured *dummyResponseWriter
 		proxyRoundtrip := proxy.Transport{
 			Scheme:      scheme,
 			Host:        host,
 			PathPrepend: pathPrepend,
 			RoundTripper: RoundTripFunc(func(r *http.Request) (*http.Response, error) {
-				rw := &dummyResponseWriter{
+				captured = &dummyResponseWriter{
 					next:   w,
 					header: make(http.Header),
 				}
-				next.ServeHTTP(rw, r)
-				return rw.getResponse(r), nil
+				next.ServeHTTP(captured, r)
+				return captured.getResponse(r), nil
 			}),
 		}
-		//proxyRoundtripper will write the response in RoundTrip func
-		resp, _ := proxyRoundtrip.RoundTrip(r)
-		responseToWriter(resp, w)
+		resp, err := proxyRoundtrip.RoundTrip(r)
+		if captured != nil && captured.direct {
+			return
+		}
+		if err != nil {
+			http.Error(w, "proxy response rewrite failed", http.StatusBadGateway)
+			return
+		}
+		if err := responseToWriter(resp, w); err != nil {
+			http.Error(w, "proxy returned an invalid response", http.StatusBadGateway)
+		}
 	})
 
 }
@@ -59,14 +69,18 @@ type dummyResponseWriter struct {
 	header     http.Header
 	body       bytes.Buffer
 	statusCode int
+	direct     bool
+	hijacked   bool
 }
 
 // Hijack implements http.Hijacker.
 func (drw *dummyResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if h, ok := drw.next.(http.Hijacker); ok {
+		drw.direct = true
+		drw.hijacked = true
 		return h.Hijack()
 	}
-	return nil, nil, fmt.Errorf("")
+	return nil, nil, fmt.Errorf("response writer does not support hijacking")
 }
 
 // Header implements the http.ResponseWriter interface.
@@ -76,12 +90,71 @@ func (drw *dummyResponseWriter) Header() http.Header {
 
 // Write implements the http.ResponseWriter interface.
 func (drw *dummyResponseWriter) Write(b []byte) (int, error) {
+	if drw.statusCode == 0 {
+		drw.statusCode = http.StatusOK
+	}
+	if !drw.direct && drw.shouldWriteDirect(b) {
+		drw.startDirect()
+	}
+	if drw.direct {
+		return drw.next.Write(b)
+	}
 	return drw.body.Write(b)
 }
 
 // WriteHeader implements the http.ResponseWriter interface.
 func (drw *dummyResponseWriter) WriteHeader(statusCode int) {
+	if drw.statusCode != 0 {
+		return
+	}
 	drw.statusCode = statusCode
+	if statusCode == http.StatusSwitchingProtocols || statusCode == http.StatusNoContent {
+		drw.startDirect()
+	}
+}
+
+func (drw *dummyResponseWriter) Flush() {
+	if drw.statusCode == 0 {
+		drw.statusCode = http.StatusOK
+	}
+	drw.startDirect()
+	_ = http.NewResponseController(drw.next).Flush()
+}
+
+func (drw *dummyResponseWriter) Unwrap() http.ResponseWriter {
+	return drw.next
+}
+
+func (drw *dummyResponseWriter) Push(target string, options *http.PushOptions) error {
+	if pusher, ok := drw.next.(http.Pusher); ok {
+		return pusher.Push(target, options)
+	}
+	return http.ErrNotSupported
+}
+
+func (drw *dummyResponseWriter) shouldWriteDirect(body []byte) bool {
+	if drw.statusCode >= http.StatusMultipleChoices && drw.statusCode < http.StatusBadRequest {
+		return false
+	}
+	contentType := strings.TrimSpace(strings.SplitN(drw.header.Get("Content-Type"), ";", 2)[0])
+	if contentType == "" && len(body) > 0 {
+		contentType = strings.TrimSpace(strings.SplitN(http.DetectContentType(body), ";", 2)[0])
+		drw.header.Set("Content-Type", contentType)
+	}
+	return contentType != "" && contentType != "text/html"
+}
+
+func (drw *dummyResponseWriter) startDirect() {
+	if drw.direct || drw.hijacked {
+		return
+	}
+	copyResponseHeader(drw.next.Header(), drw.header)
+	drw.next.WriteHeader(drw.GetStatusCode())
+	drw.direct = true
+	if drw.body.Len() > 0 {
+		_, _ = drw.next.Write(drw.body.Bytes())
+		drw.body.Reset()
+	}
 }
 
 // GetStatusCode returns the status code written to the response.
@@ -105,12 +178,22 @@ func (drw *dummyResponseWriter) getResponse(req *http.Request) *http.Response {
 	}
 }
 
-func responseToWriter(resp *http.Response, writer http.ResponseWriter) {
-	for k, v := range resp.Header {
-		writer.Header()[k] = v
+func responseToWriter(resp *http.Response, writer http.ResponseWriter) error {
+	if resp == nil {
+		return fmt.Errorf("nil proxy response")
 	}
-	if resp.StatusCode != http.StatusOK {
-		writer.WriteHeader(resp.StatusCode)
+	defer resp.Body.Close()
+	copyResponseHeader(writer.Header(), resp.Header)
+	writer.WriteHeader(resp.StatusCode)
+	_, err := io.Copy(writer, resp.Body)
+	return err
+}
+
+func copyResponseHeader(dst, src http.Header) {
+	for key, values := range src {
+		dst.Del(key)
+		for _, value := range values {
+			dst.Add(key, value)
+		}
 	}
-	_, _ = io.Copy(writer, resp.Body)
 }

@@ -11,13 +11,18 @@ else
 fi
 
 CUSTOM_METRICS_SOURCE="internal/ui/ui/dashboard/js/custom-metrics.js"
-if [[ ! -f "$CUSTOM_METRICS_SOURCE" ]]; then
-    echo "Missing custom Dashboard script: $CUSTOM_METRICS_SOURCE" >&2
-    exit 1
-fi
+CUSTOM_PRIORITY_LISTS_SOURCE="internal/ui/ui/dashboard/js/custom-priority-lists.js"
+for custom_script in "$CUSTOM_METRICS_SOURCE" "$CUSTOM_PRIORITY_LISTS_SOURCE"; do
+    if [[ ! -f "$custom_script" ]]; then
+        echo "Missing custom Dashboard script: $custom_script" >&2
+        exit 1
+    fi
+done
 CUSTOM_METRICS_TMP=$(mktemp)
-trap 'rm -f "$CUSTOM_METRICS_TMP"' EXIT
+CUSTOM_PRIORITY_LISTS_TMP=$(mktemp)
+trap 'rm -f "$CUSTOM_METRICS_TMP" "$CUSTOM_PRIORITY_LISTS_TMP"' EXIT
 cp "$CUSTOM_METRICS_SOURCE" "$CUSTOM_METRICS_TMP"
+cp "$CUSTOM_PRIORITY_LISTS_SOURCE" "$CUSTOM_PRIORITY_LISTS_TMP"
 
 rm -rf internal/ui/ui/*
 
@@ -25,6 +30,7 @@ mkdir -p internal/ui/ui/dashboard
 cd internal/ui/ui/dashboard || exit 1;
 curl -sL https://pandaria-dashboard-ui.s3.ap-southeast-2.amazonaws.com/release-2.9-cn/kube-explorer-ui/${CATTLE_DASHBOARD_UI_VERSION}.tar.gz | $TAR_CMD xvzf - --strip-components=2
 cp "$CUSTOM_METRICS_TMP" js/custom-metrics.js
+cp "$CUSTOM_PRIORITY_LISTS_TMP" js/custom-priority-lists.js
 # Rancher Dashboard emits prefetch tags for every lazy chunk. That makes the
 # browser download nearly the entire UI bundle on the first page. Keep the
 # chunks lazy and retain only the build-generated preload tags for entry files.
@@ -54,12 +60,19 @@ const authAfter = 'case 3:if(window.__KUBE_EXPLORER_STANDALONE__)return Object(G
 const htmlFile = 'index.html';
 const html = fs.readFileSync(htmlFile, 'utf8');
 const customMetricsFile = 'js/custom-metrics.js';
+const customPriorityListsFile = 'js/custom-priority-lists.js';
 const customMetricsVersion = crypto.createHash('sha256')
     .update(fs.readFileSync(customMetricsFile))
     .digest('hex')
     .slice(0, 12);
 const customMetricsTag = `<script src="${customMetricsFile}?v=${customMetricsVersion}"></script>`;
+const customPriorityListsVersion = crypto.createHash('sha256')
+    .update(fs.readFileSync(customPriorityListsFile))
+    .digest('hex')
+    .slice(0, 12);
+const customPriorityListsTag = `<script src="${customPriorityListsFile}?v=${customPriorityListsVersion}"></script>`;
 const customMetricsPattern = /<script src="js\/custom-metrics\.js(?:\?v=[^"]*)?"><\/script>/g;
+const customPriorityListsPattern = /<script src="js\/custom-priority-lists\.js(?:\?v=[^"]*)?"><\/script>/g;
 const entryPattern = /<script src="js\/index\.[^"]+\.js"><\/script>/g;
 const entryMatches = html.match(entryPattern) || [];
 const probeMatches = source.split(before).length - 1;
@@ -78,7 +91,8 @@ if (probeMatches !== 1 || authMatches !== 1 || entryMatches.length !== 1 || flee
 const patchedSource = source.replace(before, after).replace(authBefore, authAfter);
 const patchedHtml = html
     .replace(customMetricsPattern, '')
-    .replace(entryPattern, `<script>window.__KUBE_EXPLORER_STANDALONE__=true</script>${entryMatches[0]}${customMetricsTag}`);
+    .replace(customPriorityListsPattern, '')
+    .replace(entryPattern, `<script>window.__KUBE_EXPLORER_STANDALONE__=true</script>${entryMatches[0]}${customPriorityListsTag}${customMetricsTag}`);
 
 fs.writeFileSync(file, patchedSource);
 fs.writeFileSync(htmlFile, patchedHtml);

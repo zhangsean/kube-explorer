@@ -20,7 +20,6 @@ func StaticSetting[T any](input T) func() T {
 type Handler struct {
 	contentHandlers map[string]content.Handler
 	pathSetting     func() string
-	indexSetting    func() string
 	releaseSetting  func() bool
 	offlineSetting  func() string
 	middleware      func(http.Handler) http.Handler
@@ -30,9 +29,7 @@ type Handler struct {
 type Options struct {
 	// The location on disk of the UI files
 	Path StringSetting
-	// The HTTP URL of the index file to download
-	Index StringSetting
-	// Whether or not to run the UI offline, should return true/false/dynamic/embed
+	// Whether to use a local path or embedded UI, should return true/dynamic/embed.
 	Offline StringSetting
 	// Whether or not is it release, if true UI will run offline if set to dynamic
 	ReleaseSetting BoolSetting
@@ -45,7 +42,6 @@ func NewUIHandler(opts *Options) *Handler {
 
 	h := &Handler{
 		contentHandlers: make(map[string]content.Handler),
-		indexSetting:    opts.Index,
 		offlineSetting:  opts.Offline,
 		pathSetting:     opts.Path,
 		releaseSetting:  opts.ReleaseSetting,
@@ -62,10 +58,6 @@ func NewUIHandler(opts *Options) *Handler {
 		}.Handler,
 	}
 
-	if h.indexSetting == nil {
-		h.indexSetting = StaticSetting("")
-	}
-
 	if h.offlineSetting == nil {
 		h.offlineSetting = StaticSetting("dynamic")
 	}
@@ -79,7 +71,6 @@ func NewUIHandler(opts *Options) *Handler {
 	}
 
 	h.contentHandlers["embed"] = content.NewEmbedded(staticContent, "ui")
-	h.contentHandlers["false"] = content.NewExternal(h.indexSetting)
 	h.contentHandlers["true"] = content.NewFilepath(h.pathSetting)
 
 	return h
@@ -92,7 +83,6 @@ func (h *Handler) content() content.Handler {
 	}
 	embedHandler := h.contentHandlers["embed"]
 	filepathHandler := h.contentHandlers["true"]
-	externalHandler := h.contentHandlers["false"]
 	// default to dynamic
 	switch {
 	case h.pathSetting() != "":
@@ -104,11 +94,7 @@ func (h *Handler) content() content.Handler {
 		// release must use embed first
 		return embedHandler
 	default:
-		// try embed
-		if _, err := embedHandler.GetIndex(); err == nil {
-			return embedHandler
-		}
-		return externalHandler
+		return embedHandler
 	}
 }
 

@@ -1,22 +1,36 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
-const listCacheTTL = 15 * time.Second
+const (
+	listCacheTTL        = 15 * time.Second
+	listCacheMaxEntries = 128
+	listCacheMaxBytes   = 64 << 20
+)
 
 var cachedListResponses = struct {
 	sync.Mutex
-	items map[string]cachedListResponse
+	items      map[string]listCacheEntry
+	totalBytes int64
+	generation uint64
 }{
-	items: map[string]cachedListResponse{},
+	items: map[string]listCacheEntry{},
 }
+
+var listRequestGroup singleflight.Group
 
 type cachedListResponse struct {
 	status int
@@ -25,8 +39,24 @@ type cachedListResponse struct {
 	until  time.Time
 }
 
+type listCacheEntry struct {
+	response   cachedListResponse
+	size       int64
+	lastAccess time.Time
+	generation uint64
+}
+
 func optimizeListRequests(next http.Handler, enablePrioritySnapshots bool) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		if isMutatingRequest(req) {
+			recorder := &responseStatusWriter{ResponseWriter: rw}
+			next.ServeHTTP(recorder, req)
+			if recorder.statusCode() >= http.StatusOK && recorder.statusCode() < http.StatusMultipleChoices {
+				invalidateListCaches()
+			}
+			return
+		}
+
 		if applyPriorityListFilter(req) {
 			rw.Header().Set("X-Kube-Explorer-List-Filter", "priority")
 		}
@@ -45,21 +75,48 @@ func optimizeListRequests(next http.Handler, enablePrioritySnapshots bool) http.
 
 		key := listCacheKey(req)
 		if cached, ok := getCachedListResponse(key); ok {
+			recordListCacheRequest("hit")
+			cached.header = cloneHeader(cached.header)
+			cached.header.Set("X-Kube-Explorer-Cache", "HIT")
 			writeCachedListResponse(rw, cached)
 			return
 		}
+		recordListCacheRequest("miss")
 
-		recorder := newListResponseRecorder()
-		next.ServeHTTP(recorder, req)
-		recorder.writeTo(rw)
-
-		if recorder.statusCode() == http.StatusOK && isJSONResponse(recorder.header) {
-			setCachedListResponse(key, cachedListResponse{
+		generation := listCacheGeneration()
+		result := listRequestGroup.DoChan(key, func() (interface{}, error) {
+			if cached, ok := getCachedListResponse(key); ok {
+				return cached, nil
+			}
+			recorder := newListResponseRecorder()
+			next.ServeHTTP(recorder, req)
+			response := cachedListResponse{
 				status: recorder.statusCode(),
 				header: cloneHeader(recorder.header),
-				body:   recorder.body.Bytes(),
-				until:  time.Now().Add(listCacheTTL),
-			})
+				body:   append([]byte(nil), recorder.body.Bytes()...),
+			}
+			if response.status == http.StatusOK && isJSONResponse(response.header) {
+				response.until = time.Now().Add(listCacheTTL)
+				setCachedListResponse(key, response, generation)
+			}
+			return response, nil
+		})
+
+		select {
+		case <-req.Context().Done():
+			return
+		case resolved := <-result:
+			if resolved.Err != nil {
+				http.Error(rw, resolved.Err.Error(), http.StatusBadGateway)
+				return
+			}
+			response := resolved.Val.(cachedListResponse)
+			if resolved.Shared {
+				recordListCacheRequest("coalesced")
+				response.header = cloneHeader(response.header)
+				response.header.Set("X-Kube-Explorer-Cache", "COALESCED")
+			}
+			writeCachedListResponse(rw, response)
 		}
 	})
 }
@@ -190,37 +247,204 @@ func isCacheableListRequest(req *http.Request) bool {
 }
 
 func listCacheKey(req *http.Request) string {
-	auth := req.Header.Get("Authorization")
-	cookie := req.Header.Get("Cookie")
-	return strings.Join([]string{req.Method, req.URL.Path, req.URL.RawQuery, auth, cookie}, "\x00")
+	identity := sha256.Sum256([]byte(req.Header.Get("Authorization") + "\x00" + req.Header.Get("Cookie")))
+	return strings.Join([]string{
+		req.Method,
+		req.URL.Path,
+		req.URL.RawQuery,
+		requestBaseURL(req),
+		req.Header.Get("X-Forwarded-Prefix"),
+		req.Header.Get("Accept"),
+		fmt.Sprintf("%x", identity),
+	}, "\x00")
 }
 
 func getCachedListResponse(key string) (cachedListResponse, bool) {
 	cachedListResponses.Lock()
 	defer cachedListResponses.Unlock()
 
-	item, ok := cachedListResponses.items[key]
+	now := time.Now()
+	removeExpiredListCacheEntriesLocked(now)
+	entry, ok := cachedListResponses.items[key]
 	if !ok {
 		return cachedListResponse{}, false
 	}
-	if time.Now().After(item.until) {
-		delete(cachedListResponses.items, key)
-		return cachedListResponse{}, false
-	}
-	return item, true
+	entry.lastAccess = now
+	cachedListResponses.items[key] = entry
+	return entry.response, true
 }
 
-func setCachedListResponse(key string, item cachedListResponse) {
+func setCachedListResponse(key string, response cachedListResponse, generation uint64) {
 	cachedListResponses.Lock()
 	defer cachedListResponses.Unlock()
-	cachedListResponses.items[key] = item
+	if generation != cachedListResponses.generation {
+		return
+	}
+
+	now := time.Now()
+	removeExpiredListCacheEntriesLocked(now)
+	size := cachedListResponseSize(response)
+	if size > listCacheMaxBytes {
+		recordListCacheEviction("oversize")
+		return
+	}
+	if current, ok := cachedListResponses.items[key]; ok {
+		cachedListResponses.totalBytes -= current.size
+	}
+	cachedListResponses.items[key] = listCacheEntry{
+		response:   response,
+		size:       size,
+		lastAccess: now,
+		generation: generation,
+	}
+	cachedListResponses.totalBytes += size
+	evictListCacheEntriesLocked()
+	updateListCacheGauges(len(cachedListResponses.items), cachedListResponses.totalBytes)
 }
 
 func writeCachedListResponse(rw http.ResponseWriter, cached cachedListResponse) {
 	copyHeader(rw.Header(), cached.header)
-	rw.Header().Set("X-Kube-Explorer-Cache", "HIT")
 	rw.WriteHeader(cached.status)
 	_, _ = rw.Write(cached.body)
+}
+
+func listCacheGeneration() uint64 {
+	cachedListResponses.Lock()
+	defer cachedListResponses.Unlock()
+	return cachedListResponses.generation
+}
+
+func invalidateListCaches() {
+	cachedListResponses.Lock()
+	cachedListResponses.items = map[string]listCacheEntry{}
+	cachedListResponses.totalBytes = 0
+	cachedListResponses.generation++
+	cachedListResponses.Unlock()
+	updateListCacheGauges(0, 0)
+	recordListCacheInvalidation()
+	invalidatePriorityListSnapshots()
+}
+
+func cleanupListCaches() {
+	cachedListResponses.Lock()
+	removeExpiredListCacheEntriesLocked(time.Now())
+	entries := len(cachedListResponses.items)
+	bytes := cachedListResponses.totalBytes
+	cachedListResponses.Unlock()
+	updateListCacheGauges(entries, bytes)
+	cleanupPriorityListSnapshots()
+}
+
+func runListCacheJanitor(ctxDone <-chan struct{}, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctxDone:
+			return
+		case <-ticker.C:
+			cleanupListCaches()
+		}
+	}
+}
+
+func removeExpiredListCacheEntriesLocked(now time.Time) {
+	for key, entry := range cachedListResponses.items {
+		if entry.response.until.IsZero() || now.Before(entry.response.until) {
+			continue
+		}
+		delete(cachedListResponses.items, key)
+		cachedListResponses.totalBytes -= entry.size
+		recordListCacheEviction("expired")
+	}
+}
+
+func evictListCacheEntriesLocked() {
+	for len(cachedListResponses.items) > listCacheMaxEntries || cachedListResponses.totalBytes > listCacheMaxBytes {
+		var oldestKey string
+		var oldestTime time.Time
+		for key, entry := range cachedListResponses.items {
+			if oldestKey == "" || entry.lastAccess.Before(oldestTime) {
+				oldestKey = key
+				oldestTime = entry.lastAccess
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		entry := cachedListResponses.items[oldestKey]
+		delete(cachedListResponses.items, oldestKey)
+		cachedListResponses.totalBytes -= entry.size
+		recordListCacheEviction("capacity")
+	}
+}
+
+func cachedListResponseSize(response cachedListResponse) int64 {
+	size := int64(len(response.body))
+	for key, values := range response.header {
+		size += int64(len(key))
+		for _, value := range values {
+			size += int64(len(value))
+		}
+	}
+	return size
+}
+
+func isMutatingRequest(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	switch req.Method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+type responseStatusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *responseStatusWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *responseStatusWriter) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *responseStatusWriter) statusCode() int {
+	if w.status == 0 {
+		return http.StatusOK
+	}
+	return w.status
+}
+
+func (w *responseStatusWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *responseStatusWriter) Flush() {
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+func (w *responseStatusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return http.NewResponseController(w.ResponseWriter).Hijack()
+}
+
+func (w *responseStatusWriter) Push(target string, opts *http.PushOptions) error {
+	if pusher, ok := w.ResponseWriter.(http.Pusher); ok {
+		return pusher.Push(target, opts)
+	}
+	return http.ErrNotSupported
 }
 
 type listResponseRecorder struct {

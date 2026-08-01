@@ -7,12 +7,14 @@ replace k8s.io/client-go => k8s.io/client-go v0.30.1
 require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/gorilla/mux v1.8.1
+	github.com/prometheus/client_golang v1.16.0
 	github.com/rancher/apiserver v0.0.0-20240708202538-39a6f2535146
 	github.com/rancher/dynamiclistener v0.6.0-rc2
 	github.com/rancher/steve v0.0.0-20240911190153-79304d93b49b
 	github.com/rancher/wrangler/v3 v3.0.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/urfave/cli v1.22.15
+	golang.org/x/sync v0.7.0
 	golang.org/x/text v0.14.0
 	k8s.io/api v0.30.1
 	k8s.io/apimachinery v0.30.1
@@ -60,7 +62,6 @@ require (
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/pborman/uuid v1.2.1 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/prometheus/client_golang v1.16.0 // indirect
 	github.com/prometheus/client_model v0.4.0 // indirect
 	github.com/prometheus/common v0.44.0 // indirect
 	github.com/prometheus/procfs v0.10.1 // indirect
@@ -84,7 +85,6 @@ require (
 	golang.org/x/crypto v0.22.0 // indirect
 	golang.org/x/net v0.24.0 // indirect
 	golang.org/x/oauth2 v0.16.0 // indirect
-	golang.org/x/sync v0.7.0 // indirect
 	golang.org/x/sys v0.19.0 // indirect
 	golang.org/x/term v0.19.0 // indirect
 	golang.org/x/time v0.3.0 // indirect
