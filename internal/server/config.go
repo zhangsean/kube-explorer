@@ -2,8 +2,11 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/rancher/apiserver/pkg/types"
 	"github.com/rancher/apiserver/pkg/urlbuilder"
@@ -15,6 +18,8 @@ import (
 	"github.com/rancher/wrangler/v3/pkg/kubeconfig"
 	"github.com/rancher/wrangler/v3/pkg/ratelimit"
 	"github.com/sirupsen/logrus"
+	k8sschema "k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/rest"
 
 	"github.com/cnrancher/kube-explorer/internal/config"
 	"github.com/cnrancher/kube-explorer/internal/resources/cluster"
@@ -23,8 +28,10 @@ import (
 )
 
 func ToServer(ctx context.Context, c *cli.Config, sqlCache bool) (*server.Server, error) {
+	installNormalSubscribeCloseHook()
 	var (
-		auth steveauth.Middleware
+		auth                   steveauth.Middleware
+		priorityListAPIHandler http.Handler
 	)
 
 	restConfig, err := kubeconfig.GetNonInteractiveClientConfigWithContext(c.KubeConfig, c.Context).ClientConfig()
@@ -33,10 +40,13 @@ func ToServer(ctx context.Context, c *cli.Config, sqlCache bool) (*server.Server
 	}
 	restConfig.RateLimiter = ratelimit.None
 
-	restConfig.Insecure = config.InsecureSkipTLSVerify
+	if config.InsecureSkipTLSVerify {
+		restConfig.Insecure = true
+	}
 	if restConfig.Insecure {
 		restConfig.CAData = nil
 		restConfig.CAFile = ""
+		ensureUpgradeServerName(restConfig)
 	}
 
 	if c.WebhookConfig.WebhookAuthentication {
@@ -63,9 +73,10 @@ func ToServer(ctx context.Context, c *cli.Config, sqlCache bool) (*server.Server
 		SQLCache:       sqlCache,
 		// router needs to hack here
 		Router: func(h router.Handlers) http.Handler {
+			priorityListAPIHandler = router.Routes(h)
 			return handleProxyHeader(
 				rewriteLocalCluster(
-					optimizeListRequests(router.Routes(h)),
+					optimizeListRequests(priorityListAPIHandler, auth == nil),
 				),
 			)
 		},
@@ -96,7 +107,60 @@ func ToServer(ctx context.Context, c *cli.Config, sqlCache bool) (*server.Server
 			logrus.Errorf("failed to start controllers: %v", err)
 		}
 	}()
+	if err := waitForRequiredSchemas(ctx, steveServer.SchemaFactory, 90*time.Second); err != nil {
+		return steveServer, err
+	}
+	if auth == nil {
+		prewarmPriorityLists(ctx, priorityListAPIHandler)
+	}
 	return steveServer, nil
+}
+
+func ensureUpgradeServerName(restConfig *rest.Config) {
+	if restConfig == nil || !restConfig.Insecure || restConfig.ServerName != "" {
+		return
+	}
+	endpoint, err := url.Parse(restConfig.Host)
+	if err != nil {
+		return
+	}
+	restConfig.ServerName = endpoint.Hostname()
+}
+
+type schemaLookup interface {
+	ByGVK(gvk k8sschema.GroupVersionKind) string
+}
+
+func waitForRequiredSchemas(ctx context.Context, lookup schemaLookup, timeout time.Duration) error {
+	required := []k8sschema.GroupVersionKind{
+		{Version: "v1", Kind: "Namespace"},
+		{Group: "apps", Version: "v1", Kind: "Deployment"},
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		ready := true
+		for _, gvk := range required {
+			if lookup.ByGVK(gvk) == "" {
+				ready = false
+				break
+			}
+		}
+		if ready {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("timed out waiting for required Kubernetes schemas")
+		case <-ticker.C:
+		}
+	}
 }
 
 func rewriteLocalCluster(next http.Handler) http.Handler {
