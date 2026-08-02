@@ -8,6 +8,14 @@ It integrates the Rancher steve framework and its dashboard, and is recompiled, 
 
 每次发布新版本前必须更新本节，按版本倒序记录面向用户的主要变动。
 
+### v0.5.8 - 2026-08-02
+
+- 优化 Deployment、ReplicaSet 和 Pod 列表加载，使用服务端预热快照和关键字优先过滤，降低大集群首次加载与搜索等待时间。
+- 过滤请求期间保留已有 Deployment 列表，避免输入关键字时出现整页刷新、灰色空表或错误的无匹配中间状态。
+- 完善列表缓存容量、生命周期和写入后失效机制，修复重新部署后 Pod 列表短暂为空、存活时间陈旧以及 Shell/Logs 连接到旧 Pod 的问题。
+- 改进 WebSocket、日志和 YAML 等流式响应代理，确保 Shell、Logs 与 YAML 查看编辑在缓存优化后仍能正常使用。
+- Pod 日志加载完成后自动滚动到底部，同时保留用户在加载期间主动滚动时的控制权。
+
 ### v0.5.7 - 2026-07-25
 
 - 修复 Deployment、DaemonSet、StatefulSet 等工作负载详情页可能因全局命名空间筛选而不显示 Pod 的问题。

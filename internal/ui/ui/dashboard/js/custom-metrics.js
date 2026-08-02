@@ -39,6 +39,7 @@
     let rawNodesFetchedAt = 0;
     let rawPodMetricsFetchedAt = 0;
     let rawNodeMetricsFetchedAt = 0;
+    const podLogAutoScrollStates = new WeakMap();
     let rawPodsPromise = null;
     let rawNodesPromise = null;
     let rawPodMetricsPromise = null;
@@ -384,8 +385,12 @@
         const style = document.createElement('style');
         style.id = 'custom-pod-metrics-styles';
         style.textContent = `
-            body.priority-list-filter-loading main table tbody {
-                visibility: hidden;
+            body.priority-list-filter-stale-visible main table tbody:not(.priority-list-filter-stale) {
+                display: none;
+            }
+            main table tbody.priority-list-filter-stale {
+                pointer-events: none;
+                user-select: none;
             }
             .priority-list-filter-spinner {
                 display: inline-block;
@@ -2412,6 +2417,79 @@
         return true;
     }
 
+    function finishPodLogAutoScroll(virtualList, state) {
+        if (!virtualList.isConnected || state.scrolled || state.userInteracted) return;
+        if (!virtualList.querySelector('[role="group"] [role="listitem"]')) return;
+
+        clearTimeout(state.settleTimer);
+        clearTimeout(state.maxWaitTimer);
+        state.settleTimer = null;
+        state.maxWaitTimer = null;
+        state.scrolled = true;
+        virtualList.dataset.kubeExplorerLogAutoScroll = 'done';
+
+        const scrollToBottom = () => {
+            if (!virtualList.isConnected || state.userInteracted) return;
+            virtualList.scrollTop = virtualList.scrollHeight;
+        };
+        scrollToBottom();
+        requestAnimationFrame(() => requestAnimationFrame(scrollToBottom));
+        setTimeout(scrollToBottom, 100);
+        setTimeout(scrollToBottom, 300);
+    }
+
+    function schedulePodLogAutoScroll(virtualList, state) {
+        const hasLogItems = !!virtualList.querySelector('[role="group"] [role="listitem"]');
+        if (!hasLogItems) {
+            clearTimeout(state.settleTimer);
+            clearTimeout(state.maxWaitTimer);
+            state.settleTimer = null;
+            state.maxWaitTimer = null;
+            state.scrolled = false;
+            state.userInteracted = false;
+            virtualList.dataset.kubeExplorerLogAutoScroll = 'waiting';
+            return;
+        }
+        if (state.scrolled || state.userInteracted) return;
+
+        clearTimeout(state.settleTimer);
+        state.settleTimer = setTimeout(() => finishPodLogAutoScroll(virtualList, state), 250);
+        if (!state.maxWaitTimer) {
+            state.maxWaitTimer = setTimeout(() => finishPodLogAutoScroll(virtualList, state), 1500);
+        }
+        virtualList.dataset.kubeExplorerLogAutoScroll = 'pending';
+    }
+
+    function ensurePodLogAutoScroll() {
+        document.querySelectorAll('.logs-container .virtual-list').forEach((virtualList) => {
+            if (podLogAutoScrollStates.has(virtualList)) return;
+
+            const state = {
+                maxWaitTimer: null,
+                observer: null,
+                scrolled: false,
+                settleTimer: null,
+                userInteracted: false
+            };
+            const cancelAutoScroll = () => {
+                if (state.scrolled) return;
+                state.userInteracted = true;
+                clearTimeout(state.settleTimer);
+                clearTimeout(state.maxWaitTimer);
+                state.settleTimer = null;
+                state.maxWaitTimer = null;
+                virtualList.dataset.kubeExplorerLogAutoScroll = 'cancelled';
+            };
+            ['pointerdown', 'touchstart', 'wheel'].forEach((eventName) => {
+                virtualList.addEventListener(eventName, cancelAutoScroll, { passive: true });
+            });
+            state.observer = new MutationObserver(() => schedulePodLogAutoScroll(virtualList, state));
+            state.observer.observe(virtualList, { childList: true, subtree: true });
+            podLogAutoScrollStates.set(virtualList, state);
+            schedulePodLogAutoScroll(virtualList, state);
+        });
+    }
+
     function readClusterStoreCollectionData(types) {
         const store = getClusterStore();
         const haveAll = store && store.getters && store.getters['cluster/haveAll'];
@@ -3705,6 +3783,7 @@
     async function runProcessCycle() {
         ensureResourceEditRouterGuard();
         configureDefaultPodLogRange();
+        ensurePodLogAutoScroll();
         if (isProcessing) {
             pendingProcess = true;
             return;
@@ -3747,6 +3826,7 @@
 
         observer = new MutationObserver((mutations) => {
             if (priorityListControls) priorityListControls.bindFilterInput();
+            ensurePodLogAutoScroll();
             // Do not mutate Vue-owned table DOM inside MutationObserver. Queue
             // work until Vue's next tick and the frame boundary, then verify
             // that both the route and table are still current.
