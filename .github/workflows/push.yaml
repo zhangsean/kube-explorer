@@ -120,4 +120,4 @@ jobs:
         with:
           files: dist/kube-explorer-*
           generate_release_notes: true
-          draft: true
+          draft: false
