@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+fixture="$(mktemp)"
+output="$(mktemp)"
+trap 'rm -f "$fixture" "$output"' EXIT
+
+printf '%s\n' \
+    '# Example' \
+    '' \
+    '## Changelog' \
+    '' \
+    '### v1.2.3 - 2026-08-02' \
+    '' \
+    '- First change' \
+    '- Second change' \
+    '' \
+    '### v1.2.2 - 2026-08-01' \
+    '' \
+    '- Previous change' > "$fixture"
+
+./scripts/changelog-release-notes v1.2.3 "$fixture" "$output"
+
+grep -Fxq '### v1.2.3 - 2026-08-02' "$output"
+grep -Fxq -- '- First change' "$output"
+grep -Fxq -- '- Second change' "$output"
+
+if grep -Fq 'v1.2.2' "$output"; then
+    echo 'release notes included the next changelog section' >&2
+    exit 1
+fi
+
+if ./scripts/changelog-release-notes v9.9.9 "$fixture" "$output" 2>/dev/null; then
+    echo 'missing changelog version unexpectedly succeeded' >&2
+    exit 1
+fi
+
+if ./scripts/changelog-release-notes latest "$fixture" "$output" 2>/dev/null; then
+    echo 'invalid release version unexpectedly succeeded' >&2
+    exit 1
+fi

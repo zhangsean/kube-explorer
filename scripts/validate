@@ -42,6 +42,9 @@ node --check internal/ui/ui/dashboard/js/custom-metrics.js
 node --check internal/ui/ui/dashboard/js/custom-priority-lists.js
 node --test internal/ui/test/*.test.js
 
+echo "Checking release notes extraction"
+./scripts/test-changelog-release-notes
+
 echo "Tidying modules"
 go mod tidy
 
