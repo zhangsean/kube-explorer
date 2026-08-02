@@ -7,11 +7,6 @@ on:
     paths:
       - .github/workflows/backfill-releases.yaml
   workflow_dispatch:
-    inputs:
-      versions:
-        description: Space-separated release tags to publish
-        required: true
-        default: "v0.5.5 v0.5.6 v0.5.7"
 
 permissions:
   contents: write
@@ -19,57 +14,34 @@ permissions:
 jobs:
   backfill-releases:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - version: v0.5.5
+            previous: v0.5.4
+          - version: v0.5.6
+            previous: v0.5.5
+          - version: v0.5.7
+            previous: v0.5.6
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Publish historical releases
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSIONS: ${{ inputs.versions || 'v0.5.5 v0.5.6 v0.5.7' }}
+      - name: Prepare release notes
         run: |
-          set -euo pipefail
-
-          latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')"
-          read -r -a versions <<< "${RELEASE_VERSIONS}"
-
-          for version in "${versions[@]}"; do
-            notes_file="${RUNNER_TEMP}/${version}-release-notes.md"
-            ./scripts/changelog-release-notes "${version}" README.md "${notes_file}"
-
-            previous_tag="$(
-              git tag --sort=-v:refname |
-                awk -v current="${version}" 'found { print; exit } $0 == current { found = 1 }'
-            )"
-            if [[ -z "${previous_tag}" ]]; then
-              echo "previous release tag not found for ${version}" >&2
-              exit 1
-            fi
-
-            printf '\n**Full Changelog**: https://github.com/%s/compare/%s...%s\n' \
-              "${GITHUB_REPOSITORY}" "${previous_tag}" "${version}" >> "${notes_file}"
-
-            release_id="$(
-              gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${version}" --jq '.id'
-            )"
-            jq -n --rawfile body "${notes_file}" \
-              '{body: $body, draft: false, prerelease: false, make_latest: "false"}' |
-              gh api --method PATCH \
-                "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
-                --input - \
-                --jq '[.tag_name, .draft, .html_url] | @tsv'
-          done
-
-          current_latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')"
-          if [[ "${current_latest}" != "${latest_tag}" ]]; then
-            latest_release_id="$(
-              gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${latest_tag}" --jq '.id'
-            )"
-            jq -n '{make_latest: "true"}' |
-              gh api --method PATCH \
-                "repos/${GITHUB_REPOSITORY}/releases/${latest_release_id}" \
-                --input - >/dev/null
-          fi
-
-          test "$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')" = "${latest_tag}"
+          notes_file="dist/${{ matrix.version }}-release-notes.md"
+          ./scripts/changelog-release-notes \
+            "${{ matrix.version }}" README.md "${notes_file}"
+          printf '\n**Full Changelog**: https://github.com/%s/compare/%s...%s\n' \
+            "${GITHUB_REPOSITORY}" \
+            "${{ matrix.previous }}" \
+            "${{ matrix.version }}" >> "${notes_file}"
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ matrix.version }}
+          body_path: dist/${{ matrix.version }}-release-notes.md
+          draft: false
+          prerelease: false
+          make_latest: false
