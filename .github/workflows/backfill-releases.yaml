@@ -37,11 +37,31 @@ jobs:
             "${GITHUB_REPOSITORY}" \
             "${{ matrix.previous }}" \
             "${{ matrix.version }}" >> "${notes_file}"
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
+      - name: Update and publish release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_NOTES_FILE: dist/${{ matrix.version }}-release-notes.md
+          RELEASE_VERSION: ${{ matrix.version }}
         with:
-          tag_name: ${{ matrix.version }}
-          body_path: dist/${{ matrix.version }}-release-notes.md
-          draft: false
-          prerelease: false
-          make_latest: false
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync(process.env.RELEASE_NOTES_FILE, 'utf8');
+            const { owner, repo } = context.repo;
+            const { data: release } = await github.rest.repos.getReleaseByTag({
+              owner,
+              repo,
+              tag: process.env.RELEASE_VERSION,
+            });
+            const { data: updated } = await github.rest.repos.updateRelease({
+              owner,
+              repo,
+              release_id: release.id,
+              body,
+              draft: false,
+              prerelease: false,
+              make_latest: 'false',
+            });
+            if (updated.draft || updated.body !== body) {
+              core.setFailed(`release verification failed for ${process.env.RELEASE_VERSION}`);
+            }
