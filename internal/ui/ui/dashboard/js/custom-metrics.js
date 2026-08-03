@@ -2848,7 +2848,7 @@
             limitPercentage,
             requestPercentage,
             requestUsagePercentage,
-            requestWarning: request > 0 && (requestUsagePercentage < 80 || requestUsagePercentage > 120),
+            requestWarning: request > 0 && (requestUsagePercentage < 50 || requestUsagePercentage > 150),
             limitWarning: limit > 0 && limitPercentage >= 90
         };
     }
@@ -2857,21 +2857,21 @@
         if (isEnglishLocale()) {
             return {
                 usage: (value, unit) => `Usage: ${Math.round(value)}${unit}`,
-                request: (value, unit, percentage) => `REQ: ${Math.round(value)}${unit} (${Math.round(percentage)}% used)`,
-                limit: (value, unit, percentage) => `LIM: ${Math.round(value)}${unit} (${Math.round(percentage)}% used)`,
-                requestLow: 'Usage is below 80% of REQ',
-                requestHigh: 'Usage is above 120% of REQ',
-                limitWarning: 'Current usage is above 90% of LIM'
+                request: (value, unit, percentage) => `Req: ${Math.round(value)}${unit} (${Math.round(percentage)}% used)`,
+                limit: (value, unit, percentage) => `Lim: ${Math.round(value)}${unit} (${Math.round(percentage)}% used)`,
+                requestLow: 'Usage is below 50% of Req',
+                requestHigh: 'Usage is above 150% of Req',
+                limitWarning: 'Usage is above 90% of Lim'
             };
         }
 
         return {
             usage: (value, unit) => `\u7528\u91cf\uff1a${Math.round(value)}${unit}`,
-            request: (value, unit, percentage) => `REQ\uff1a${Math.round(value)}${unit}\uff08\u5f53\u524d ${Math.round(percentage)}%\uff09`,
-            limit: (value, unit, percentage) => `LIM\uff1a${Math.round(value)}${unit}\uff08\u5f53\u524d ${Math.round(percentage)}%\uff09`,
-            requestLow: '\u7528\u91cf\u4f4e\u4e8e REQ \u7684 80%',
-            requestHigh: '\u7528\u91cf\u9ad8\u4e8e REQ \u7684 120%',
-            limitWarning: '\u5f53\u524d\u7528\u91cf\u9ad8\u4e8e LIM \u7684 90%'
+            request: (value, unit, percentage) => `Req\uff1a${Math.round(value)}${unit}\uff08\u5df2\u7528 ${Math.round(percentage)}%\uff09`,
+            limit: (value, unit, percentage) => `Lim\uff1a${Math.round(value)}${unit}\uff08\u5df2\u7528 ${Math.round(percentage)}%\uff09`,
+            requestLow: '\u7528\u91cf\u4f4e\u4e8e Req \u7684 50%',
+            requestHigh: '\u7528\u91cf\u9ad8\u4e8e Req \u7684 150%',
+            limitWarning: '\u7528\u91cf\u9ad8\u4e8e Lim \u7684 90%'
         };
     }
 
@@ -2944,8 +2944,8 @@
         const details = [texts.usage(usage, unit)];
         if (request > 0) details.push(texts.request(request, unit, state.requestUsagePercentage));
         if (limit > 0) details.push(texts.limit(limit, unit, state.limitPercentage));
-        if (request > 0 && state.requestUsagePercentage < 80) details.push(texts.requestLow);
-        if (request > 0 && state.requestUsagePercentage > 120) details.push(texts.requestHigh);
+        if (request > 0 && state.requestUsagePercentage < 50) details.push(texts.requestLow);
+        if (request > 0 && state.requestUsagePercentage > 150) details.push(texts.requestHigh);
         if (state.limitWarning) details.push(texts.limitWarning);
         container.title = details.join('\n');
         if (bar) {
