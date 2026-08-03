@@ -4,8 +4,8 @@
     const CONFIG = {
         resourceType: 'pod',
         columns: [
-            { key: 'cpuUsage', label: 'CPU', width: '150px' },
-            { key: 'memoryUsage', label: 'RAM', width: '150px' }
+            { key: 'cpuUsage', label: 'CPU', width: '130px' },
+            { key: 'memoryUsage', label: 'RAM', width: '130px' }
         ]
     };
 
@@ -411,10 +411,10 @@
                 display: flex;
                 flex-direction: column;
                 align-items: flex-start;
-                gap: 3px;
-                width: 150px;
+                gap: 2px;
+                width: 100%;
                 min-width: 0;
-                max-width: 150px;
+                max-width: 130px;
                 overflow: hidden;
             }
 
@@ -423,22 +423,23 @@
             td[data-column-key="cpuUsage"],
             td[data-column-key="memoryUsage"],
             th.metrics-sortable {
-                width: 150px !important;
-                min-width: 150px !important;
-                max-width: 150px !important;
+                width: 130px !important;
+                min-width: 130px !important;
+                max-width: 130px !important;
                 box-sizing: border-box !important;
             }
 
             .metrics-main-line {
                 display: flex;
                 align-items: center;
-                gap: 4px;
+                gap: 2px;
                 width: 100%;
             }
 
             .metrics-progress-bar {
-                width: 94px;
-                flex: 0 0 94px;
+                width: auto;
+                min-width: 60px;
+                flex: 1 1 auto;
                 height: 14px;
                 background-color: var(--metrics-track-color);
                 border-radius: 999px;
@@ -497,7 +498,7 @@
             }
 
             .metrics-value {
-                min-width: 34px;
+                min-width: 32px;
                 font-weight: 500;
                 color: #2f3640;
                 font-size: 13px;
@@ -506,12 +507,12 @@
             .metrics-request-limit {
                 display: flex;
                 align-items: center;
-                gap: 4px;
+                gap: 2px;
                 font-size: 11px;
                 color: #8a93a3;
-                margin-left: 2px;
+                margin-left: 0;
                 white-space: nowrap;
-                max-width: 148px;
+                max-width: 100%;
                 overflow: hidden;
                 text-overflow: ellipsis;
             }
@@ -2051,15 +2052,40 @@
     }
 
     function colWidthByKey(key) {
-        if (key === 'name') return '220px';
-        if (key === 'namespace') return '90px';
-        if (key === 'ready') return '72px';
-        if (key === 'restarts') return '96px';
-        if (key === 'node' || key === 'ip') return '100px';
-        if (key === 'cpuUsage' || key === 'memoryUsage') return '150px';
-        if (key === 'image') return '320px';
-        if (key === 'age') return '96px';
+        const english = isEnglishLocale();
+        if (key === 'name') return '190px';
+        if (key === 'namespace') return '58px';
+        if (key === 'ready') return english ? '56px' : '52px';
+        if (key === 'restarts') return english ? '68px' : '65px';
+        if (key === 'state') return english ? '64px' : '60px';
+        if (key === 'node') return '80px';
+        if (key === 'ip') return '84px';
+        if (key === 'cpuUsage' || key === 'memoryUsage') return '130px';
+        if (key === 'image') return '424px';
+        if (key === 'age') return english ? '52px' : '48px';
         return '';
+    }
+
+    function compactPodHeaderLabels(headerRow) {
+        if (!headerRow) return;
+        const replacements = [
+            ['\u91cd\u542f\u6b21\u6570', '\u91cd\u542f'],
+            ['\u5b58\u6d3b\u65f6\u95f4', '\u5b58\u6d3b'],
+            isEnglishLocale() ? ['Namespace', 'NS'] : ['\u547d\u540d\u7a7a\u95f4', '\u7a7a\u95f4']
+        ];
+
+        headerRow.querySelectorAll('th').forEach((th) => {
+            const visit = (node) => {
+                if (node.nodeType === 3) {
+                    replacements.forEach(([from, to]) => {
+                        if (node.nodeValue.includes(from)) node.nodeValue = node.nodeValue.replace(from, to);
+                    });
+                    return;
+                }
+                Array.from(node.childNodes || []).forEach(visit);
+            };
+            visit(th);
+        });
     }
 
     function setColumnWidth(table, idx, width) {
@@ -2072,7 +2098,8 @@
         if (!table) return;
         const headerRow = table.querySelector('thead tr');
         if (!headerRow) return;
-        table.style.setProperty('min-width', '1450px', 'important');
+        compactPodHeaderLabels(headerRow);
+        table.style.setProperty('min-width', isEnglishLocale() ? '1290px' : '1265px', 'important');
         const scrollContainer = table.closest('.table-responsive') || table.parentElement;
         if (scrollContainer) {
             scrollContainer.style.setProperty('overflow-x', 'auto', 'important');
@@ -2081,7 +2108,9 @@
         const headers = Array.from(headerRow.querySelectorAll('th'));
         const findIdx = (pred) => headers.findIndex((th) => pred(normalizeHeaderText(th.textContent)));
         const nameIdx = findIdx((t) => t.startsWith('name') || t.includes('\u540d\u79f0'));
-        const namespaceIdx = findIdx((t) => t.startsWith('namespace') || t.includes('\u547d\u540d\u7a7a\u95f4'));
+        const namespaceIdx = findIdx((t) => t.startsWith('namespace') || t === 'ns' ||
+            t.includes('\u547d\u540d\u7a7a\u95f4') || t === '\u7a7a\u95f4');
+        const stateIdx = findIdx((t) => t.startsWith('state') || t.includes('\u72b6\u6001'));
         const readyIdx = findIdx((t) => t.startsWith('ready') || t.includes('\u5c31\u7eea'));
         const restartsIdx = findIdx((t) => t.startsWith('restarts') || t.includes('\u91cd\u542f'));
         const nodeIdx = findIdx((t) => t.startsWith('node') || t.includes('\u8282\u70b9'));
@@ -2089,8 +2118,9 @@
         const cpuIdx = findIdx((t) => t.startsWith('cpu'));
         const ramIdx = findIdx((t) => t.startsWith('ram') || t.startsWith('memory') || t.includes('\u5185\u5b58'));
         const imageIdx = findIdx((t) => t.startsWith('image') || t.includes('\u955c\u50cf'));
-        const ageIdx = findIdx((t) => t.startsWith('age') || t === '\u5e74\u9f84' || t === '\u5b58\u6d3b\u65f6\u95f4');
-        const layoutSig = `${nameIdx}|${namespaceIdx}|${readyIdx}|${restartsIdx}|${nodeIdx}|${ipIdx}|${cpuIdx}|${ramIdx}|${imageIdx}|${ageIdx}|${colWidthByKey('name')}|${colWidthByKey('namespace')}|${colWidthByKey('ready')}|${colWidthByKey('restarts')}|${colWidthByKey('node')}|${colWidthByKey('ip')}|${colWidthByKey('cpuUsage')}|${colWidthByKey('memoryUsage')}|${colWidthByKey('image')}|${colWidthByKey('age')}`;
+        const ageIdx = findIdx((t) => t.startsWith('age') || t === '\u5e74\u9f84' ||
+            t === '\u5b58\u6d3b\u65f6\u95f4' || t === '\u5b58\u6d3b');
+        const layoutSig = `${nameIdx}|${namespaceIdx}|${stateIdx}|${readyIdx}|${restartsIdx}|${nodeIdx}|${ipIdx}|${cpuIdx}|${ramIdx}|${imageIdx}|${ageIdx}|${colWidthByKey('name')}|${colWidthByKey('namespace')}|${colWidthByKey('state')}|${colWidthByKey('ready')}|${colWidthByKey('restarts')}|${colWidthByKey('node')}|${colWidthByKey('ip')}|${colWidthByKey('cpuUsage')}|${colWidthByKey('memoryUsage')}|${colWidthByKey('image')}|${colWidthByKey('age')}`;
         const lastSig = table.dataset.podLayoutSig || '';
 
         const setHeaderWidth = (idx, w) => {
@@ -2102,6 +2132,7 @@
 
         setHeaderWidth(nameIdx, colWidthByKey('name'));
         setHeaderWidth(namespaceIdx, colWidthByKey('namespace'));
+        setHeaderWidth(stateIdx, colWidthByKey('state'));
         setHeaderWidth(readyIdx, colWidthByKey('ready'));
         setHeaderWidth(restartsIdx, colWidthByKey('restarts'));
         setHeaderWidth(nodeIdx, colWidthByKey('node'));
@@ -2110,6 +2141,12 @@
         setHeaderWidth(ramIdx, colWidthByKey('memoryUsage'));
         setHeaderWidth(imageIdx, colWidthByKey('image'));
         setHeaderWidth(ageIdx, colWidthByKey('age'));
+        [namespaceIdx, readyIdx, restartsIdx, cpuIdx, ramIdx, ipIdx, nodeIdx, ageIdx].forEach((idx) => {
+            if (idx < 0 || !headers[idx]) return;
+            headers[idx].style.setProperty('font-size', '13px', 'important');
+            headers[idx].style.setProperty('padding-left', '3px', 'important');
+            headers[idx].style.setProperty('padding-right', '3px', 'important');
+        });
         if (lastSig !== layoutSig) {
             table.dataset.podLayoutSig = layoutSig;
         }
@@ -2129,6 +2166,7 @@
                 };
                 setCellWidth(nameIdx, colWidthByKey('name'));
                 setCellWidth(namespaceIdx, colWidthByKey('namespace'));
+                setCellWidth(stateIdx, colWidthByKey('state'));
                 setCellWidth(readyIdx, colWidthByKey('ready'));
                 setCellWidth(restartsIdx, colWidthByKey('restarts'));
                 setCellWidth(nodeIdx, colWidthByKey('node'));
@@ -2136,6 +2174,23 @@
                 setCellWidth(cpuIdx, colWidthByKey('cpuUsage'));
                 setCellWidth(ramIdx, colWidthByKey('memoryUsage'));
                 setCellWidth(imageIdx, colWidthByKey('image'));
+                [namespaceIdx, stateIdx, readyIdx, restartsIdx, cpuIdx, ramIdx, ipIdx, nodeIdx, ageIdx].forEach((idx) => {
+                    if (idx < 0 || !cells[idx]) return;
+                    cells[idx].style.setProperty('padding-left', '4px', 'important');
+                    cells[idx].style.setProperty('padding-right', '4px', 'important');
+                });
+                [cpuIdx, ramIdx].forEach((idx) => {
+                    if (idx < 0 || !cells[idx]) return;
+                    cells[idx].style.setProperty('padding-left', '1px', 'important');
+                    cells[idx].style.setProperty('padding-right', '1px', 'important');
+                });
+                if (namespaceIdx >= 0 && cells[namespaceIdx]) {
+                    cells[namespaceIdx].style.setProperty('white-space', 'normal', 'important');
+                    cells[namespaceIdx].style.setProperty('overflow-wrap', 'anywhere', 'important');
+                    cells[namespaceIdx].style.setProperty('word-break', 'break-word', 'important');
+                    cells[namespaceIdx].style.setProperty('overflow', 'visible', 'important');
+                    cells[namespaceIdx].style.setProperty('text-overflow', 'clip', 'important');
+                }
                 if (nameIdx >= 0 && cells[nameIdx]) {
                     cells[nameIdx].style.setProperty('white-space', 'normal', 'important');
                     cells[nameIdx].style.setProperty('overflow-wrap', 'anywhere', 'important');
@@ -2147,6 +2202,11 @@
                     cells[imageIdx].style.setProperty('word-break', 'break-word', 'important');
                 }
                 setCellWidth(ageIdx, colWidthByKey('age'));
+                [stateIdx, readyIdx, restartsIdx, nodeIdx, ipIdx, ageIdx].forEach((idx) => {
+                    if (idx < 0 || !cells[idx]) return;
+                    cells[idx].style.setProperty('overflow', 'hidden', 'important');
+                    cells[idx].style.setProperty('text-overflow', 'ellipsis', 'important');
+                });
                 row.dataset.podLayoutSigApplied = layoutSig;
             });
         });
