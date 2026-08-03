@@ -2861,17 +2861,17 @@
                 limit: (value, unit, percentage) => `LIM: ${Math.round(value)}${unit} (${Math.round(percentage)}% used)`,
                 requestLow: 'Usage is below 80% of REQ',
                 requestHigh: 'Usage is above 120% of REQ',
-                limitWarning: 'Usage has reached 90% of LIM'
+                limitWarning: 'Current usage is above 90% of LIM'
             };
         }
 
         return {
-            usage: (value, unit) => `\u5b9e\u9645\u7528\u91cf\uff1a${Math.round(value)}${unit}`,
+            usage: (value, unit) => `\u7528\u91cf\uff1a${Math.round(value)}${unit}`,
             request: (value, unit, percentage) => `REQ\uff1a${Math.round(value)}${unit}\uff08\u5f53\u524d ${Math.round(percentage)}%\uff09`,
             limit: (value, unit, percentage) => `LIM\uff1a${Math.round(value)}${unit}\uff08\u5f53\u524d ${Math.round(percentage)}%\uff09`,
-            requestLow: '\u5b9e\u9645\u7528\u91cf\u4f4e\u4e8e REQ \u7684 80%',
-            requestHigh: '\u5b9e\u9645\u7528\u91cf\u9ad8\u4e8e REQ \u7684 120%',
-            limitWarning: '\u5b9e\u9645\u7528\u91cf\u5df2\u8fbe\u5230 LIM \u7684 90%'
+            requestLow: '\u7528\u91cf\u4f4e\u4e8e REQ \u7684 80%',
+            requestHigh: '\u7528\u91cf\u9ad8\u4e8e REQ \u7684 120%',
+            limitWarning: '\u5f53\u524d\u7528\u91cf\u9ad8\u4e8e LIM \u7684 90%'
         };
     }
 
