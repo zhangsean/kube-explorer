@@ -13,11 +13,13 @@
     let sortState = { key: '', asc: false };
     let metricsCache = {};
     let podResourcesCache = {};
+    let podRestartInfoCache = {};
     let nodeResourceSummaryCache = {};
     let lastFetchTime = 0;
     let lastNodeFetchTime = 0;
     const CACHE_DURATION = 15000;
     const REFRESH_INTERVAL = 15000;
+    const POD_RESTART_EVENT_CACHE_DURATION = 60000;
     const POD_LOG_RANGE_PREFERENCE = 'logs-range';
     const POD_LOG_LEGACY_DEFAULT_RANGE = '30 minutes';
     const POD_LOG_DEFAULT_RANGE = '1000 lines';
@@ -46,6 +48,8 @@
     let rawNodeMetricsPromise = null;
     let podLogDefaultConfigured = false;
     const pendingPodTableRefreshes = new Map();
+    const podRestartEventCache = new Map();
+    const podRestartEventPromises = new Map();
     let podTableRefreshScheduled = false;
     const RESOURCE_EDIT_RETURN_KEY = 'kubeExplorer.resourceEditReturnUrl';
     const WORKLOAD_RESOURCE_TYPES = new Set([
@@ -529,6 +533,12 @@
             .metrics-limit-value.limit-warning {
                 color: var(--metrics-limit-color);
                 font-weight: 700;
+            }
+
+            td.pod-restart-reason {
+                cursor: help;
+                text-decoration: underline dotted #8a93a3;
+                text-underline-offset: 3px;
             }
 
             .metrics-sortable .sort {
@@ -1262,7 +1272,8 @@
         if (!table || !table.isConnected || !isPodTable(table)) return;
         ensureWorkloadPodTableIgnoresNamespaceFilter(table);
         if (!reconcilePodTransitionRows(table)) return;
-        if (lastFetchTime <= 0 && Object.keys(metricsCache).length === 0 && Object.keys(podResourcesCache).length === 0) return;
+        if (lastFetchTime <= 0 && Object.keys(metricsCache).length === 0 &&
+            Object.keys(podResourcesCache).length === 0 && Object.keys(podRestartInfoCache).length === 0) return;
 
         // A complete SortableTable can be replaced during route or watch
         // updates. Install the active metric sort before the next paint so the
@@ -1276,7 +1287,11 @@
         }
         addCustomColumns(table);
         applyPodColumnLayout(table);
-        updateTableWithMetrics(table, { metrics: metricsCache, resources: podResourcesCache });
+        updateTableWithMetrics(table, {
+            metrics: metricsCache,
+            resources: podResourcesCache,
+            restarts: podRestartInfoCache
+        });
         enableMetricSorting(table);
         restartSortableLiveColumns(findSortableTableComponent(table));
     }
@@ -2343,6 +2358,260 @@
 
         return resources;
     }
+
+    function buildPodRestartInfo(pod) {
+        const status = pod && pod.status ? pod.status : {};
+        const containerStatuses = []
+            .concat(status.initContainerStatuses || [])
+            .concat(status.containerStatuses || []);
+        const containers = containerStatuses
+            .filter((container) => Number(container && container.restartCount) > 0)
+            .map((container) => {
+                const terminated = container && container.lastState && container.lastState.terminated;
+                return {
+                    name: container.name || '',
+                    restartCount: Number(container.restartCount) || 0,
+                    terminated: terminated ? {
+                        reason: terminated.reason || '',
+                        message: terminated.message || '',
+                        exitCode: Number.isFinite(Number(terminated.exitCode)) ? Number(terminated.exitCode) : null,
+                        signal: Number(terminated.signal) || 0,
+                        finishedAt: terminated.finishedAt || ''
+                    } : null
+                };
+            });
+        if (!containers.length) return null;
+
+        const metadata = pod && pod.metadata ? pod.metadata : {};
+        return {
+            uid: metadata.uid || '',
+            namespace: metadata.namespace || '',
+            name: metadata.name || '',
+            totalRestartCount: containers.reduce((total, container) => total + container.restartCount, 0),
+            containers
+        };
+    }
+
+    function restartEventTimestamp(event) {
+        const value = event && (
+            event.eventTime ||
+            event.lastTimestamp ||
+            (event.series && event.series.lastObservedTime) ||
+            (event.metadata && event.metadata.creationTimestamp)
+        );
+        const timestamp = value ? Date.parse(value) : 0;
+        return Number.isFinite(timestamp) ? timestamp : 0;
+    }
+
+    function probeFailureType(event) {
+        const message = (event && event.message ? event.message : '').toString();
+        const match = message.match(/\b(liveness|startup) probe failed\b/i);
+        return match ? match[1].toLowerCase() : '';
+    }
+
+    function restartEventContainerName(event) {
+        const fieldPath = event && event.involvedObject ? event.involvedObject.fieldPath || '' : '';
+        const match = fieldPath.match(/\{([^}]+)\}/);
+        return match ? match[1] : '';
+    }
+
+    function findLatestProbeFailureEvent(events, container) {
+        const containerName = container && container.name ? container.name : '';
+        const finishedAt = container && container.terminated && container.terminated.finishedAt ?
+            Date.parse(container.terminated.finishedAt) : 0;
+        if (!finishedAt || !Number.isFinite(finishedAt)) return null;
+        return (Array.isArray(events) ? events : [])
+            .filter((event) => {
+                if (!probeFailureType(event)) return false;
+                const eventContainer = restartEventContainerName(event);
+                if (eventContainer && containerName && eventContainer !== containerName) return false;
+
+                const eventAt = restartEventTimestamp(event);
+                if (!eventAt) return false;
+                return eventAt >= finishedAt - (30 * 60 * 1000) && eventAt <= finishedAt + (5 * 60 * 1000);
+            })
+            .sort((a, b) => restartEventTimestamp(b) - restartEventTimestamp(a))[0] || null;
+    }
+
+    function compactRestartMessage(value) {
+        const message = (value || '').toString().replace(/\s+/g, ' ').trim();
+        return message.length > 320 ? `${message.slice(0, 317)}...` : message;
+    }
+
+    function formatRestartTime(value, english) {
+        const timestamp = value ? Date.parse(value) : 0;
+        if (!Number.isFinite(timestamp) || timestamp <= 0) return '';
+        return new Intl.DateTimeFormat(english ? 'en-US' : 'zh-CN', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: english
+        }).format(new Date(timestamp));
+    }
+
+    function formatPodRestartTooltip(info, events, english) {
+        if (!info || !Array.isArray(info.containers) || !info.containers.length) return '';
+        const lines = [english ? 'Restart details' : '\u91cd\u542f\u8be6\u60c5'];
+
+        info.containers.forEach((container, index) => {
+            if (index > 0) lines.push('');
+            const terminated = container.terminated;
+            const probeEvent = terminated && terminated.reason === 'OOMKilled' ? null :
+                findLatestProbeFailureEvent(events, container);
+            let cause = '';
+
+            if (probeEvent) {
+                const type = probeFailureType(probeEvent);
+                if (english) {
+                    cause = type === 'startup' ? 'Startup probe failed' : 'Liveness probe failed';
+                } else {
+                    cause = type === 'startup' ? '\u542f\u52a8\u63a2\u9488\u5931\u8d25' : '\u5b58\u6d3b\u63a2\u9488\u5931\u8d25';
+                }
+            } else if (terminated && terminated.reason) {
+                cause = terminated.reason === 'OOMKilled' && !english ?
+                    'OOMKilled\uff08\u5185\u5b58\u4e0d\u8db3\uff09' : terminated.reason;
+            } else {
+                cause = english ? 'Reason unavailable (status/event expired)' :
+                    '\u539f\u56e0\u4e0d\u53ef\u7528\uff08\u72b6\u6001\u6216 Event \u5df2\u8fc7\u671f\uff09';
+            }
+
+            const prefix = english ? `Container ${container.name || '-'}: ` :
+                `\u5bb9\u5668 ${container.name || '-'}\uff1a`;
+            const suffix = english ? `; restarts ${container.restartCount}` :
+                `\uff1b\u91cd\u542f ${container.restartCount} \u6b21`;
+            lines.push(`${prefix}${cause}${suffix}`);
+
+            if (terminated && terminated.exitCode !== null) {
+                lines.push(english ? `Exit code: ${terminated.exitCode}` :
+                    `\u9000\u51fa\u7801\uff1a${terminated.exitCode}`);
+            }
+            if (terminated && terminated.signal) {
+                lines.push(english ? `Signal: ${terminated.signal}` : `\u4fe1\u53f7\uff1a${terminated.signal}`);
+            }
+            const finishedAt = terminated ? formatRestartTime(terminated.finishedAt, english) : '';
+            if (finishedAt) {
+                lines.push(english ? `Last restart: ${finishedAt}` : `\u6700\u8fd1\u91cd\u542f\uff1a${finishedAt}`);
+            }
+
+            const detail = compactRestartMessage(probeEvent ? probeEvent.message : (terminated && terminated.message));
+            if (detail) {
+                lines.push(english ? `Details: ${detail}` : `\u8be6\u60c5\uff1a${detail}`);
+            }
+        });
+
+        return lines.join('\n');
+    }
+
+    function podRestartInfoKey(info) {
+        if (!info) return '';
+        return info.uid || `${info.namespace || ''}/${info.name || ''}`;
+    }
+
+    function needsPodRestartEventLookup(info) {
+        return !!(info && Array.isArray(info.containers) && info.containers.some((container) => {
+            const terminated = container && container.terminated;
+            return !terminated || terminated.reason !== 'OOMKilled';
+        }));
+    }
+
+    async function getPodRestartEvents(info) {
+        const key = podRestartInfoKey(info);
+        if (!key || !info.uid) return [];
+
+        const cached = podRestartEventCache.get(key);
+        if (cached && Date.now() - cached.fetchedAt < POD_RESTART_EVENT_CACHE_DURATION) {
+            return cached.events;
+        }
+        if (podRestartEventPromises.has(key)) return podRestartEventPromises.get(key);
+
+        const url = `/v1/events?filter=involvedObject.uid=${encodeURIComponent(info.uid)}` +
+            '&limit=100&exclude=metadata.managedFields';
+        const promise = fetchCollectionJSON([url], 'pod restart events')
+            .then((data) => Array.isArray(data && data.data) ? data.data : [])
+            .catch(() => [])
+            .then((events) => {
+                podRestartEventCache.set(key, { events, fetchedAt: Date.now() });
+                return events;
+            })
+            .finally(() => {
+                podRestartEventPromises.delete(key);
+            });
+        podRestartEventPromises.set(key, promise);
+        return promise;
+    }
+
+    function setPodRestartCellTooltip(cell, info, events) {
+        if (!cell) return;
+        if (!info) {
+            const wasEnhanced = cell.classList.contains('pod-restart-reason') || !!cell.dataset.podRestartKey;
+            cell.classList.remove('pod-restart-reason');
+            if (wasEnhanced) {
+                cell.removeAttribute('title');
+                cell.removeAttribute('aria-label');
+            }
+            delete cell.dataset.podRestartKey;
+            delete cell.__kubeExplorerPodRestartInfo;
+            if (cell.dataset.podRestartTabindex === 'true') {
+                cell.removeAttribute('tabindex');
+                delete cell.dataset.podRestartTabindex;
+            }
+            return;
+        }
+
+        const tooltip = formatPodRestartTooltip(info, events, isEnglishLocale());
+        if (!tooltip) return;
+        const restartText = (cell.textContent || '').replace(/\s+/g, ' ').trim();
+        cell.classList.add('pod-restart-reason');
+        cell.title = tooltip;
+        cell.setAttribute('aria-label', `${restartText}. ${tooltip.replace(/\n+/g, '. ')}`);
+        cell.dataset.podRestartKey = podRestartInfoKey(info);
+        cell.__kubeExplorerPodRestartInfo = info;
+        if (!cell.hasAttribute('tabindex')) {
+            cell.tabIndex = 0;
+            cell.dataset.podRestartTabindex = 'true';
+        }
+    }
+
+    async function enrichPodRestartCell(cell) {
+        const info = cell && cell.__kubeExplorerPodRestartInfo;
+        if (!info || !needsPodRestartEventLookup(info)) return;
+        const key = podRestartInfoKey(info);
+        const events = await getPodRestartEvents(info);
+        if (!cell.isConnected || cell.dataset.podRestartKey !== key) return;
+        setPodRestartCellTooltip(cell, info, events);
+    }
+
+    function updatePodRestartCell(cell, info) {
+        setPodRestartCellTooltip(cell, info, []);
+        if (!cell || !info || cell.dataset.podRestartHandler === 'true') return;
+        cell.dataset.podRestartHandler = 'true';
+        cell.addEventListener('mouseenter', () => enrichPodRestartCell(cell));
+        cell.addEventListener('focus', () => enrichPodRestartCell(cell));
+    }
+
+    function findPodRestartInfoForRow(row, restarts) {
+        if (!row || !restarts) return null;
+        const preferredKeys = [];
+        row.querySelectorAll('a[href*="/pod/"]').forEach((link) => {
+            const href = link.getAttribute('href') || '';
+            const match = href.match(/\/pod\/([^\/?#]+)\/([^\/?#]+)/i);
+            if (!match) return;
+            const namespace = decodeURIComponent(match[1]);
+            const name = decodeURIComponent(match[2]);
+            preferredKeys.push(`${namespace}/${name}`, `${namespace}:${name}`, name);
+        });
+        preferredKeys.push(...extractRowPodKeys(row));
+
+        for (const key of preferredKeys) {
+            const info = restarts[normalizeKey(key)];
+            if (info) return info;
+        }
+        return null;
+    }
+
     function getPodKeys(pod) {
         const keys = new Set();
         const id = pod && pod.id ? String(pod.id) : '';
@@ -2839,16 +3108,30 @@
 
     async function fetchPodMetrics() {
         const now = Date.now();
-        if (now - lastFetchTime < CACHE_DURATION && Object.keys(metricsCache).length > 0) {
-            return { metrics: metricsCache, resources: podResourcesCache };
+        if (now - lastFetchTime < CACHE_DURATION && (
+            Object.keys(metricsCache).length > 0 || Object.keys(podResourcesCache).length > 0 ||
+            Object.keys(podRestartInfoCache).length > 0
+        )) {
+            return {
+                metrics: metricsCache,
+                resources: podResourcesCache,
+                restarts: podRestartInfoCache
+            };
         }
 
         try {
-            const [podsData, podMetricsData] = await Promise.all([getPodsData(), getPodMetricsData()]);
+            const [podsData, podMetricsData] = await Promise.all([
+                getPodsData(),
+                getPodMetricsData().catch((error) => {
+                    console.error('Failed to fetch pod metrics:', error);
+                    return { data: [] };
+                })
+            ]);
             const pods = podsData.data || [];
             const podMetrics = podMetricsData.data || [];
 
             podResourcesCache = {};
+            podRestartInfoCache = {};
             metricsCache = {};
 
             pods.forEach((pod) => {
@@ -2865,6 +3148,13 @@
                 keys.forEach((key) => {
                     podResourcesCache[normalizeKey(key)] = resourcesEntry;
                 });
+
+                const restartInfo = buildPodRestartInfo(pod);
+                if (restartInfo) {
+                    keys.forEach((key) => {
+                        podRestartInfoCache[normalizeKey(key)] = restartInfo;
+                    });
+                }
             });
 
             podMetrics.forEach((item) => {
@@ -2876,7 +3166,11 @@
             });
 
             lastFetchTime = now;
-            return { metrics: metricsCache, resources: podResourcesCache };
+            return {
+                metrics: metricsCache,
+                resources: podResourcesCache,
+                restarts: podRestartInfoCache
+            };
         } catch (error) {
             console.error('Failed to fetch pod metrics:', error);
             return null;
@@ -3524,7 +3818,11 @@
         addCustomColumns(table);
         applyPodColumnLayout(table);
         if (metricsCache || podResourcesCache) {
-            updateTableWithMetrics(table, { metrics: metricsCache, resources: podResourcesCache });
+            updateTableWithMetrics(table, {
+                metrics: metricsCache,
+                resources: podResourcesCache,
+                restarts: podRestartInfoCache
+            });
         }
         sortRowsByMetric(table, sortState.key, sortState.asc, metricsCache, resetPage);
         enableMetricSorting(table);
@@ -3567,8 +3865,9 @@
     function updateTableWithMetrics(table, data) {
         if (!data) return;
 
-        const { metrics, resources } = data;
+        const { metrics, resources, restarts = podRestartInfoCache } = data;
         const headerIndexes = getHeaderIndexes(table);
+        const restartsIndex = typeof headerIndexes.restarts === 'number' ? headerIndexes.restarts : -1;
         const cpuIndex = typeof headerIndexes.cpu === 'number' ? headerIndexes.cpu : -1;
         const memoryIndex = typeof headerIndexes.memory === 'number' ? headerIndexes.memory : -1;
 
@@ -3582,6 +3881,11 @@
             }
             if (!isPodDataRow(row)) return;
             ensurePodMetricCells(row, cpuIndex, memoryIndex);
+
+            if (restartsIndex >= 0) {
+                const restartCell = row.querySelectorAll('td')[restartsIndex];
+                updatePodRestartCell(restartCell, findPodRestartInfoForRow(row, restarts));
+            }
 
             const rowKeys = extractRowPodKeys(row);
             if (rowKeys.length === 0) return;
