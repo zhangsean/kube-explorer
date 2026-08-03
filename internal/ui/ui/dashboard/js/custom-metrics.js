@@ -403,6 +403,11 @@
                 display: none;
             }
             .metrics-progress-container {
+                --metrics-usage-color: #5f9fd6;
+                --metrics-track-color: #c7ccd8;
+                --metrics-request-color: #596273;
+                --metrics-request-warning-color: #b7791f;
+                --metrics-limit-color: #d43f3a;
                 display: flex;
                 flex-direction: column;
                 align-items: flex-start;
@@ -432,10 +437,10 @@
             }
 
             .metrics-progress-bar {
-                width: 82px;
-                flex: 0 0 82px;
+                width: 94px;
+                flex: 0 0 94px;
                 height: 14px;
-                background-color: #c7ccd8;
+                background-color: var(--metrics-track-color);
                 border-radius: 999px;
                 overflow: hidden;
                 position: relative;
@@ -445,8 +450,13 @@
                 padding: 0 !important;
             }
 
+            .metrics-request-marker[hidden] {
+                display: none;
+            }
+
             .metrics-progress-fill {
                 position: absolute;
+                z-index: 2;
                 left: 0;
                 top: 0;
                 bottom: 0;
@@ -454,8 +464,26 @@
                 margin: 0 !important;
                 border-radius: 999px;
                 transition: width 0.3s ease;
-                background: #5f9fd6;
+                background: var(--metrics-usage-color);
                 transform: none !important;
+            }
+
+            .metrics-request-marker {
+                position: absolute;
+                z-index: 3;
+                top: 1px;
+                bottom: 1px;
+                width: 2px;
+                border-radius: 1px;
+                background: var(--metrics-request-color);
+                box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.72);
+                transform: translateX(-1px);
+                transition: left 0.3s ease, background-color 0.2s ease;
+                pointer-events: none;
+            }
+
+            .metrics-request-marker.request-warning {
+                background: var(--metrics-request-warning-color);
             }
 
             .percentage-bar > .bar,
@@ -463,8 +491,9 @@
                 border-radius: 999px !important;
             }
 
-            .metrics-progress-fill.limit-warning {
-                background: #e53935;
+            .metrics-progress-fill.limit-warning,
+            .node-usage-progress .metrics-progress-fill.limit-warning {
+                background: var(--metrics-limit-color);
             }
 
             .metrics-value {
@@ -475,6 +504,9 @@
             }
 
             .metrics-request-limit {
+                display: flex;
+                align-items: center;
+                gap: 4px;
                 font-size: 11px;
                 color: #8a93a3;
                 margin-left: 2px;
@@ -482,6 +514,20 @@
                 max-width: 148px;
                 overflow: hidden;
                 text-overflow: ellipsis;
+            }
+
+            .metrics-request-limit-separator {
+                color: #b5bbc5;
+            }
+
+            .metrics-request-value.request-warning {
+                color: var(--metrics-request-warning-color);
+                font-weight: 600;
+            }
+
+            .metrics-limit-value.limit-warning {
+                color: var(--metrics-limit-color);
+                font-weight: 700;
             }
 
             .metrics-sortable .sort {
@@ -2785,12 +2831,137 @@
         return 0;
     }
 
+    function calculateRequestPercentage(request, limit) {
+        if (request <= 0) return 0;
+        if (limit > 0) return (request / limit) * 100;
+        return 100;
+    }
+
+    function metricDisplayState(usage, request, limit) {
+        const usagePercentage = Math.max(0, calculateUsagePercentage(usage, request, limit));
+        const limitPercentage = limit > 0 ? Math.max(0, (usage / limit) * 100) : 0;
+        const requestPercentage = Math.max(0, calculateRequestPercentage(request, limit));
+        const requestUsagePercentage = request > 0 ? Math.max(0, (usage / request) * 100) : 0;
+
+        return {
+            usagePercentage,
+            limitPercentage,
+            requestPercentage,
+            requestUsagePercentage,
+            requestWarning: request > 0 && (requestUsagePercentage < 80 || requestUsagePercentage > 120),
+            limitWarning: limit > 0 && limitPercentage >= 90
+        };
+    }
+
+    function getMetricTooltipTexts() {
+        if (isEnglishLocale()) {
+            return {
+                usage: (value, unit) => `Usage: ${Math.round(value)}${unit}`,
+                request: (value, unit, percentage) => `REQ: ${Math.round(value)}${unit} (${Math.round(percentage)}% used)`,
+                limit: (value, unit, percentage) => `LIM: ${Math.round(value)}${unit} (${Math.round(percentage)}% used)`,
+                requestLow: 'Usage is below 80% of REQ',
+                requestHigh: 'Usage is above 120% of REQ',
+                limitWarning: 'Usage has reached 90% of LIM'
+            };
+        }
+
+        return {
+            usage: (value, unit) => `\u5b9e\u9645\u7528\u91cf\uff1a${Math.round(value)}${unit}`,
+            request: (value, unit, percentage) => `REQ\uff1a${Math.round(value)}${unit}\uff08\u5f53\u524d ${Math.round(percentage)}%\uff09`,
+            limit: (value, unit, percentage) => `LIM\uff1a${Math.round(value)}${unit}\uff08\u5f53\u524d ${Math.round(percentage)}%\uff09`,
+            requestLow: '\u5b9e\u9645\u7528\u91cf\u4f4e\u4e8e REQ \u7684 80%',
+            requestHigh: '\u5b9e\u9645\u7528\u91cf\u9ad8\u4e8e REQ \u7684 120%',
+            limitWarning: '\u5b9e\u9645\u7528\u91cf\u5df2\u8fbe\u5230 LIM \u7684 90%'
+        };
+    }
+
+    function appendMetricLabel(parent, className, label, value, unit, warningClass) {
+        const item = document.createElement('span');
+        item.className = className;
+        if (warningClass) item.classList.add(warningClass);
+        item.textContent = `${label} ${Math.round(value)}${unit}`;
+        parent.appendChild(item);
+    }
+
+    function updateRequestLimitLabels(element, request, limit, unit, state) {
+        element.textContent = '';
+        let hasLabel = false;
+
+        if (request > 0) {
+            appendMetricLabel(
+                element,
+                'metrics-request-value',
+                'Req',
+                request,
+                unit,
+                state.requestWarning ? 'request-warning' : ''
+            );
+            hasLabel = true;
+        }
+        if (limit > 0) {
+            if (hasLabel) {
+                const separator = document.createElement('span');
+                separator.className = 'metrics-request-limit-separator';
+                separator.textContent = '/';
+                element.appendChild(separator);
+            }
+            appendMetricLabel(
+                element,
+                'metrics-limit-value',
+                'Lim',
+                limit,
+                unit,
+                state.limitWarning ? 'limit-warning' : ''
+            );
+            hasLabel = true;
+        }
+        if (!hasLabel) element.textContent = '-';
+    }
+
+    function updateProgressBar(container, usage, request, limit, unit) {
+        const state = metricDisplayState(usage, request, limit);
+        const bar = container.querySelector('.metrics-progress-bar');
+        const fill = container.querySelector('.metrics-progress-fill');
+        const requestMarker = container.querySelector('.metrics-request-marker');
+        const value = container.querySelector('.metrics-value');
+        const requestLimit = container.querySelector('.metrics-request-limit');
+
+        if (fill) {
+            fill.style.width = `${Math.min(state.usagePercentage, 100)}%`;
+            fill.classList.toggle('limit-warning', state.limitWarning);
+        }
+        if (requestMarker) {
+            requestMarker.hidden = request <= 0;
+            requestMarker.style.left = `${Math.min(Math.max(state.requestPercentage, 1), 99)}%`;
+            requestMarker.classList.toggle('request-warning', state.requestWarning);
+        }
+        if (value) {
+            value.textContent = `${Math.round(usage)}${unit}`;
+        }
+        if (requestLimit) updateRequestLimitLabels(requestLimit, request, limit, unit, state);
+
+        const texts = getMetricTooltipTexts();
+        const details = [texts.usage(usage, unit)];
+        if (request > 0) details.push(texts.request(request, unit, state.requestUsagePercentage));
+        if (limit > 0) details.push(texts.limit(limit, unit, state.limitPercentage));
+        if (request > 0 && state.requestUsagePercentage < 80) details.push(texts.requestLow);
+        if (request > 0 && state.requestUsagePercentage > 120) details.push(texts.requestHigh);
+        if (state.limitWarning) details.push(texts.limitWarning);
+        container.title = details.join('\n');
+        if (bar) {
+            const max = Math.max(limit || request || usage || 1, 1);
+            bar.setAttribute('role', 'progressbar');
+            bar.setAttribute('aria-valuemin', '0');
+            bar.setAttribute('aria-valuemax', `${Math.round(max)}`);
+            bar.setAttribute('aria-valuenow', `${Math.round(Math.min(Math.max(usage, 0), max))}`);
+            bar.setAttribute('aria-valuetext', details.join(', '));
+        }
+    }
+
     function createProgressBar(usage, request, limit, unit) {
         const container = document.createElement('div');
         container.className = 'metrics-progress-container';
 
-        const percentage = calculateUsagePercentage(usage, request, limit);
-        const limitPercentage = limit > 0 ? (usage / limit) * 100 : 0;
         const mainLine = document.createElement('div');
         mainLine.className = 'metrics-main-line';
         const barContainer = document.createElement('div');
@@ -2798,37 +2969,31 @@
 
         const fill = document.createElement('div');
         fill.className = 'metrics-progress-fill';
-        if (limit > 0 && limitPercentage >= 90) {
-            fill.classList.add('limit-warning');
-        }
-        fill.style.width = `${Math.min(percentage, 100)}%`;
+
+        const requestMarker = document.createElement('div');
+        requestMarker.className = 'metrics-request-marker';
 
         const value = document.createElement('span');
         value.className = 'metrics-value';
-        value.textContent = `${Math.round(usage)}${unit}`;
 
         const requestLimit = document.createElement('span');
         requestLimit.className = 'metrics-request-limit';
-        const parts = [];
-        if (request > 0) {
-            parts.push(`Req ${Math.round(request)}${unit}`);
-        }
-        if (limit > 0) {
-            parts.push(`Lim ${Math.round(limit)}${unit}`);
-        }
-        requestLimit.textContent = parts.length > 0 ? parts.join(' / ') : '-';
 
         barContainer.appendChild(fill);
+        barContainer.appendChild(requestMarker);
         mainLine.appendChild(barContainer);
         mainLine.appendChild(value);
         container.appendChild(mainLine);
         container.appendChild(requestLimit);
+
+        updateProgressBar(container, usage, request, limit, unit);
 
         return container;
     }
 
     function metricRenderSignature(usage, request, limit, unit) {
         return [
+            isEnglishLocale() ? 'en' : 'zh',
             unit,
             Math.round(usage || 0),
             Math.round(request || 0),
@@ -2860,22 +3025,7 @@
             return;
         }
 
-        const fill = container.querySelector('.metrics-progress-fill');
-        const value = container.querySelector('.metrics-value');
-        const requestLimit = container.querySelector('.metrics-request-limit');
-        const percentage = calculateUsagePercentage(usage, request, limit);
-        const limitPercentage = limit > 0 ? (usage / limit) * 100 : 0;
-        if (fill) {
-            fill.style.width = `${Math.min(percentage, 100)}%`;
-            fill.classList.toggle('limit-warning', limit > 0 && limitPercentage >= 90);
-        }
-        if (value) value.textContent = `${Math.round(usage)}${unit}`;
-        if (requestLimit) {
-            const parts = [];
-            if (request > 0) parts.push(`Req ${Math.round(request)}${unit}`);
-            if (limit > 0) parts.push(`Lim ${Math.round(limit)}${unit}`);
-            requestLimit.textContent = parts.length > 0 ? parts.join(' / ') : '-';
-        }
+        updateProgressBar(container, usage, request, limit, unit);
     }
 
     function getPodMetricValue(pod, key, metrics) {
