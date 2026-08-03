@@ -20,6 +20,8 @@
     const CACHE_DURATION = 15000;
     const REFRESH_INTERVAL = 15000;
     const POD_RESTART_EVENT_CACHE_DURATION = 60000;
+    const POD_RESTART_LOG_CACHE_DURATION = 300000;
+    const POD_RESTART_LOG_TAIL_LINES = 120;
     const POD_LOG_RANGE_PREFERENCE = 'logs-range';
     const POD_LOG_LEGACY_DEFAULT_RANGE = '30 minutes';
     const POD_LOG_DEFAULT_RANGE = '1000 lines';
@@ -50,6 +52,8 @@
     const pendingPodTableRefreshes = new Map();
     const podRestartEventCache = new Map();
     const podRestartEventPromises = new Map();
+    const podRestartLogCache = new Map();
+    const podRestartLogPromises = new Map();
     let podTableRefreshScheduled = false;
     const RESOURCE_EDIT_RETURN_KEY = 'kubeExplorer.resourceEditReturnUrl';
     const WORKLOAD_RESOURCE_TYPES = new Set([
@@ -2387,9 +2391,32 @@
             uid: metadata.uid || '',
             namespace: metadata.namespace || '',
             name: metadata.name || '',
+            nodeName: pod && pod.spec ? pod.spec.nodeName || '' : '',
             totalRestartCount: containers.reduce((total, container) => total + container.restartCount, 0),
             containers
         };
+    }
+
+    function annotateSharedRestartInterruptions(infos) {
+        const entries = [];
+        (Array.isArray(infos) ? infos : []).forEach((info) => {
+            (info.containers || []).forEach((container) => {
+                const terminated = container.terminated;
+                const finishedAt = terminated && terminated.finishedAt ? Date.parse(terminated.finishedAt) : 0;
+                if (terminated && terminated.exitCode === 255 && Number.isFinite(finishedAt) && finishedAt > 0) {
+                    entries.push({ info, container, finishedAt });
+                }
+            });
+        });
+
+        entries.forEach((entry) => {
+            const related = entries.filter((candidate) => Math.abs(candidate.finishedAt - entry.finishedAt) <= 5000);
+            const nodes = new Set(related.map((candidate) => candidate.info.nodeName).filter(Boolean));
+            const namespaces = new Set(related.map((candidate) => candidate.info.namespace).filter(Boolean));
+            if (related.length >= 4 && nodes.size >= 1 && namespaces.size >= 2) {
+                entry.container.sharedInterruptionCount = related.length;
+            }
+        });
     }
 
     function restartEventTimestamp(event) {
@@ -2438,6 +2465,63 @@
         return message.length > 320 ? `${message.slice(0, 317)}...` : message;
     }
 
+    function restartLogEvidence(value) {
+        const lines = (value || '').toString()
+            .replace(/\x1b\[[0-9;]*m/g, '')
+            .split(/\r?\n/)
+            .map((line) => line.replace(/^\s+|\s+$/g, ''))
+            .filter(Boolean);
+        if (!lines.length) return '';
+
+        const scored = [];
+        lines.forEach((line, index) => {
+            let score = 0;
+            if (/^reason\s*:/i.test(line)) score = 7;
+            else if (/\b(?:caused by|panic|fatal|emerg)\b/i.test(line)) score = 6;
+            else if (/\b(?:application failed to start|error executing command)\b/i.test(line)) score = 5;
+            else if (/\b(?:exception|error)\b/i.test(line)) score = 4;
+            else if (/\b(?:failed|failure|denied|refused|timed out|not found|cannot|unable|invalid|killed)\b/i.test(line)) score = 3;
+            if (score > 0) scored.push({ line, index, score });
+        });
+        if (!scored.length) return '';
+
+        scored.sort((a, b) => b.score - a.score || b.index - a.index);
+        return compactRestartMessage(scored[0].line);
+    }
+
+    function genericExitCodeHint(exitCode, english, logState) {
+        let suffix = '';
+        if (logState === 'unclear') {
+            suffix = english ? '; no clear error found in the previous log' :
+                '\uff1b\u4e0a\u6b21\u65e5\u5fd7\u672a\u627e\u5230\u660e\u786e\u9519\u8bef';
+        } else if (logState === 'unavailable') {
+            suffix = english ? '; previous log unavailable' : '\uff1b\u4e0a\u6b21\u65e5\u5fd7\u4e0d\u53ef\u7528';
+        }
+        if (exitCode === 1) {
+            return (english ? 'application startup or runtime failure' : '\u5e94\u7528\u542f\u52a8\u6216\u8fd0\u884c\u5931\u8d25') + suffix;
+        }
+        if (exitCode === 126) {
+            return english ? 'command found but cannot be executed' : '\u547d\u4ee4\u5b58\u5728\u4f46\u65e0\u6cd5\u6267\u884c';
+        }
+        if (exitCode === 127) {
+            return english ? 'command not found' : '\u547d\u4ee4\u4e0d\u5b58\u5728';
+        }
+        if (exitCode === 137) {
+            return english ? 'SIGKILL; possible OOM or forced termination' : 'SIGKILL\uff1b\u53ef\u80fd\u5185\u5b58\u4e0d\u8db3\u6216\u88ab\u5f3a\u5236\u7ec8\u6b62';
+        }
+        if (exitCode === 139) {
+            return english ? 'SIGSEGV; segmentation fault' : 'SIGSEGV\uff1b\u6bb5\u9519\u8bef';
+        }
+        if (exitCode === 143) {
+            return english ? 'SIGTERM; external or graceful termination' : 'SIGTERM\uff1b\u5916\u90e8\u6216\u4f18\u96c5\u7ec8\u6b62';
+        }
+        if (exitCode === 255) {
+            return (english ? 'application returned -1 or was externally interrupted' :
+                '\u5e94\u7528\u8fd4\u56de -1 \u6216\u88ab\u5916\u90e8\u4e2d\u65ad') + suffix;
+        }
+        return (english ? 'non-zero process exit' : '\u8fdb\u7a0b\u975e 0 \u9000\u51fa') + suffix;
+    }
+
     function formatRestartTime(value, english) {
         const timestamp = value ? Date.parse(value) : 0;
         if (!Number.isFinite(timestamp) || timestamp <= 0) return '';
@@ -2452,9 +2536,9 @@
         }).format(new Date(timestamp));
     }
 
-    function formatPodRestartTooltip(info, events, english) {
+    function formatPodRestartTooltip(info, events, logs, english) {
         if (!info || !Array.isArray(info.containers) || !info.containers.length) return '';
-        const lines = [english ? 'Restart details' : '\u91cd\u542f\u8be6\u60c5'];
+        const lines = [];
 
         info.containers.forEach((container, index) => {
             if (index > 0) lines.push('');
@@ -2478,28 +2562,41 @@
                     '\u539f\u56e0\u4e0d\u53ef\u7528\uff08\u72b6\u6001\u6216 Event \u5df2\u8fc7\u671f\uff09';
             }
 
-            const prefix = english ? `Container ${container.name || '-'}: ` :
-                `\u5bb9\u5668 ${container.name || '-'}\uff1a`;
-            const suffix = english ? `; restarts ${container.restartCount}` :
-                `\uff1b\u91cd\u542f ${container.restartCount} \u6b21`;
-            lines.push(`${prefix}${cause}${suffix}`);
+            lines.push(english ?
+                `Container: ${container.name || '-'}, restarted ${container.restartCount} times` :
+                `\u5bb9\u5668\uff1a${container.name || '-'}\uff0c\u91cd\u542f ${container.restartCount} \u6b21`);
 
-            if (terminated && terminated.exitCode !== null) {
-                lines.push(english ? `Exit code: ${terminated.exitCode}` :
-                    `\u9000\u51fa\u7801\uff1a${terminated.exitCode}`);
-            }
-            if (terminated && terminated.signal) {
-                lines.push(english ? `Signal: ${terminated.signal}` : `\u4fe1\u53f7\uff1a${terminated.signal}`);
-            }
-            const finishedAt = terminated ? formatRestartTime(terminated.finishedAt, english) : '';
-            if (finishedAt) {
-                lines.push(english ? `Last restart: ${finishedAt}` : `\u6700\u8fd1\u91cd\u542f\uff1a${finishedAt}`);
-            }
-
+            const logResult = logs && container.name ? logs[container.name] : null;
+            const logDetail = logResult ? restartLogEvidence(logResult.text) : '';
             const detail = compactRestartMessage(probeEvent ? probeEvent.message : (terminated && terminated.message));
-            if (detail) {
-                lines.push(english ? `Details: ${detail}` : `\u8be6\u60c5\uff1a${detail}`);
+            if (!probeEvent && terminated && terminated.reason === 'Error' && !detail) {
+                if (terminated.exitCode === 255 && container.sharedInterruptionCount) {
+                    cause = english ?
+                        `Suspected node/container runtime interruption (${container.sharedInterruptionCount} containers exited at the same time)` :
+                        `\u7591\u4f3c\u8282\u70b9/\u5bb9\u5668\u8fd0\u884c\u65f6\u4e2d\u65ad\uff08\u540c\u65f6 ${container.sharedInterruptionCount} \u4e2a\u5bb9\u5668\u9000\u51fa\uff09`;
+                } else if (logDetail) {
+                    cause = `${cause}${english ? ': ' : '\uff1a'}${logDetail}`;
+                } else if (logResult) {
+                    cause = `${cause}${english ? ' (' : '\uff08'}${genericExitCodeHint(
+                        terminated.exitCode,
+                        english,
+                        logResult.available ? 'unclear' : 'unavailable'
+                    )}${english ? ')' : '\uff09'}`;
+                }
             }
+            let errorMessage = detail && cause && !detail.toLowerCase().includes(cause.toLowerCase()) ?
+                `${cause}${english ? ': ' : '\uff1a'}${detail}` : (detail || cause || '-');
+            if (terminated && terminated.signal) {
+                errorMessage += english ? ` (signal ${terminated.signal})` :
+                    `\uff08\u4fe1\u53f7 ${terminated.signal}\uff09`;
+            }
+            const exitCode = terminated && terminated.exitCode !== null ? terminated.exitCode : '-';
+            lines.push(english ? `Exit code: ${exitCode}, ${errorMessage}` :
+                `\u9000\u51fa\u7801\uff1a${exitCode}\uff0c${errorMessage}`);
+
+            const finishedAt = terminated ? formatRestartTime(terminated.finishedAt, english) : '';
+            lines.push(english ? `Last restart: ${finishedAt || '-'}` :
+                `\u6700\u8fd1\u91cd\u542f\uff1a${finishedAt || '-'}`);
         });
 
         return lines.join('\n');
@@ -2514,6 +2611,13 @@
         return !!(info && Array.isArray(info.containers) && info.containers.some((container) => {
             const terminated = container && container.terminated;
             return !terminated || terminated.reason !== 'OOMKilled';
+        }));
+    }
+
+    function needsPodRestartLogLookup(info) {
+        return !!(info && Array.isArray(info.containers) && info.containers.some((container) => {
+            const terminated = container && container.terminated;
+            return terminated && terminated.reason === 'Error' && !terminated.message;
         }));
     }
 
@@ -2543,7 +2647,58 @@
         return promise;
     }
 
-    function setPodRestartCellTooltip(cell, info, events) {
+    function podRestartLogKey(info, container) {
+        const terminated = container && container.terminated;
+        return `${podRestartInfoKey(info)}|${container && container.name || ''}|` +
+            `${container && container.restartCount || 0}|${terminated && terminated.finishedAt || ''}`;
+    }
+
+    async function getPreviousContainerLog(info, container) {
+        const key = podRestartLogKey(info, container);
+        const cached = podRestartLogCache.get(key);
+        if (cached && Date.now() - cached.fetchedAt < POD_RESTART_LOG_CACHE_DURATION) return cached.result;
+        if (podRestartLogPromises.has(key)) return podRestartLogPromises.get(key);
+
+        if (!info.namespace || !info.name || !container.name) {
+            return { text: '', available: false };
+        }
+        const url = `/k8s/clusters/local/api/v1/namespaces/${encodeURIComponent(info.namespace)}` +
+            `/pods/${encodeURIComponent(info.name)}/log?container=${encodeURIComponent(container.name)}` +
+            `&previous=true&tailLines=${POD_RESTART_LOG_TAIL_LINES}&timestamps=false`;
+        const promise = fetch(url, {
+            headers: getAPIHeaders(),
+            credentials: 'same-origin'
+        }).then(async (resp) => ({
+            text: resp.ok ? await resp.text() : '',
+            available: resp.ok
+        })).catch(() => ({ text: '', available: false }))
+            .then((result) => {
+                podRestartLogCache.set(key, { result, fetchedAt: Date.now() });
+                return result;
+            })
+            .finally(() => {
+                podRestartLogPromises.delete(key);
+            });
+        podRestartLogPromises.set(key, promise);
+        return promise;
+    }
+
+    async function getPodRestartLogs(info) {
+        const containers = (info && info.containers || []).filter((container) => {
+            const terminated = container && container.terminated;
+            return terminated && terminated.reason === 'Error' && !terminated.message;
+        });
+        const results = await Promise.all(containers.map(async (container) => ({
+            name: container.name,
+            result: await getPreviousContainerLog(info, container)
+        })));
+        return results.reduce((logs, item) => {
+            logs[item.name] = item.result;
+            return logs;
+        }, {});
+    }
+
+    function setPodRestartCellTooltip(cell, info, events, logs) {
         if (!cell) return;
         if (!info) {
             const wasEnhanced = cell.classList.contains('pod-restart-reason') || !!cell.dataset.podRestartKey;
@@ -2561,7 +2716,7 @@
             return;
         }
 
-        const tooltip = formatPodRestartTooltip(info, events, isEnglishLocale());
+        const tooltip = formatPodRestartTooltip(info, events, logs, isEnglishLocale());
         if (!tooltip) return;
         const restartText = (cell.textContent || '').replace(/\s+/g, ' ').trim();
         cell.classList.add('pod-restart-reason');
@@ -2577,15 +2732,18 @@
 
     async function enrichPodRestartCell(cell) {
         const info = cell && cell.__kubeExplorerPodRestartInfo;
-        if (!info || !needsPodRestartEventLookup(info)) return;
+        if (!info || (!needsPodRestartEventLookup(info) && !needsPodRestartLogLookup(info))) return;
         const key = podRestartInfoKey(info);
-        const events = await getPodRestartEvents(info);
+        const [events, logs] = await Promise.all([
+            needsPodRestartEventLookup(info) ? getPodRestartEvents(info) : [],
+            needsPodRestartLogLookup(info) ? getPodRestartLogs(info) : {}
+        ]);
         if (!cell.isConnected || cell.dataset.podRestartKey !== key) return;
-        setPodRestartCellTooltip(cell, info, events);
+        setPodRestartCellTooltip(cell, info, events, logs);
     }
 
     function updatePodRestartCell(cell, info) {
-        setPodRestartCellTooltip(cell, info, []);
+        setPodRestartCellTooltip(cell, info, [], {});
         if (!cell || !info || cell.dataset.podRestartHandler === 'true') return;
         cell.dataset.podRestartHandler = 'true';
         cell.addEventListener('mouseenter', () => enrichPodRestartCell(cell));
@@ -3133,6 +3291,7 @@
             podResourcesCache = {};
             podRestartInfoCache = {};
             metricsCache = {};
+            const restartInfos = [];
 
             pods.forEach((pod) => {
                 const keys = getPodKeys(pod);
@@ -3151,11 +3310,13 @@
 
                 const restartInfo = buildPodRestartInfo(pod);
                 if (restartInfo) {
+                    restartInfos.push(restartInfo);
                     keys.forEach((key) => {
                         podRestartInfoCache[normalizeKey(key)] = restartInfo;
                     });
                 }
             });
+            annotateSharedRestartInterruptions(restartInfos);
 
             podMetrics.forEach((item) => {
                 const keys = getPodKeys(item);
